@@ -168,11 +168,34 @@ def KFoldNegGen(datasetname: str, n_split: int, all_triples_set, LP_triples_pos,
             neg_triples = dh.loadTriples(f"approach/KFold/{datasetname}_{n_split}_fold/{i}th_neg")
             LP_triples_neg.append(neg_triples)
     return LP_triples_neg
+### Focus on this function
+
+import multiprocessing as mp
+
+parallel_uv = True
+
+def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname, results):
+    #count = 0
+    sib_sum = 0
+    sib_sum_h = 0
+    sib_sum_t = 0
+    
+    # Process each edge in the partition
+    for u, v in edge_partition:
+        w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
+        #count += 1
+        sib_sum += w
+        sib_sum_h += w1
+        sib_sum_t += w2
+
+    results.append((sib_sum, sib_sum_h, sib_sum_t))
+    
 
 def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, heur):
     '''
     compute the ReliK score on all subgraphs according to chosen heuristic
     '''
+    
     df = pd.DataFrame(full_graph.triples, columns=['subject', 'predicate', 'object'])
     M = nx.MultiDiGraph()
 
@@ -187,33 +210,89 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
     for t in df.values:
         M.add_edge(t[0], t[2], label = t[1])
 
+
     model_ReliK_score = []
     model_ReliK_score_h = []
     model_ReliK_score_t = []
     tracker = 0
-    for subgraph in subgraphs:
-        count = 0
-        sib_sum = 0
-        sib_sum_h = 0
-        sib_sum_t = 0
-        for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
-            w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
-            count += 1
-            sib_sum += w
-            sib_sum_h += w1
-            sib_sum_t += w2
-        
+    ### HERE!!!
+    if parallel_uv is False:
+        #start_time_enum_subgraph = timeit.default_timer()
+        for subgraph in subgraphs:
+            count = 0
+            sib_sum = 0
+            sib_sum_h = 0
+            sib_sum_t = 0
+            start_uv = timeit.default_timer()
+            for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
+                w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
+                count += 1
+                sib_sum += w
+                sib_sum_h += w1
+                sib_sum_t += w2
+            end_uv = timeit.default_timer()
+            print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}')
 
-        sib_sum = sib_sum/count
-        sib_sum_h = sib_sum_h/count
-        sib_sum_t = sib_sum_t/count
-        model_ReliK_score.append(sib_sum)
-        model_ReliK_score_h.append(sib_sum_h)
-        model_ReliK_score_t.append(sib_sum_t)
-        tracker += 1
-        if tracker % 10 == 0: print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+            sib_sum = sib_sum/count
+            sib_sum_h = sib_sum_h/count
+            sib_sum_t = sib_sum_t/count
+            model_ReliK_score.append(sib_sum)
+            model_ReliK_score_h.append(sib_sum_h)
+            model_ReliK_score_t.append(sib_sum_t)
+            tracker += 1
+            if tracker % 10 == 0: print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+        #end_time_enum_subgraph = timeit.default_timer()
+        #print(f'Enum subgraph time: {end_time_enum_subgraph - start_time_enum_subgraph}')
+    else: # parallel_uv = True
+        # Try to use multi processors
+        for subgraph in subgraphs:
+            count = 0
+            sib_sum = 0
+            sib_sum_h = 0
+            sib_sum_t = 0
+            start_uv = timeit.default_timer()
+            
+            edges = list(nx.DiGraph(M).subgraph(subgraph).edges())
+            count = len(edges)
+            num_processors = 10
+
+            chunk_size = len(edges) // num_processors
+
+            edge_chunks = [edges[i * chunk_size:(i + 1) * chunk_size] if i < num_processors - 1 else edges[i * chunk_size:] for i in range(num_processors)]
+            
+
+            manager = mp.Manager()
+            results = manager.list()
+
+            processes = []
+            for i,edge_chunk in enumerate(edge_chunks):
+                p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname, results))
+                p.start()
+                processes.append(p)
+            
+            for p in processes:
+                p.join()
+            
+            sib_sum = sum([r[0] for r in results])
+            sib_sum_h = sum([r[1] for r in results])
+            sib_sum_t = sum([r[2] for r in results])
+            #print(sib_sum, sib_sum_h, sib_sum_t)
+
+            end_uv = timeit.default_timer()
+            print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}')
+
+            sib_sum = sib_sum/count
+            sib_sum_h = sib_sum_h/count
+            sib_sum_t = sib_sum_t/count
+            model_ReliK_score.append(sib_sum)
+            model_ReliK_score_h.append(sib_sum_h)
+            model_ReliK_score_t.append(sib_sum_t)
+            tracker += 1
+            if tracker % 10 == 0: print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
 
     path = f"approach/scoreData/{datasetname}_{n_split}/{embedding}/ReliK_score_subgraphs_{size_subgraph}.csv"
+    if parallel_uv is True:
+        path = f"approach/scoreData/{datasetname}_{n_split}/{embedding}/ReliK_score_subgraphs_{size_subgraph}_parallel.csv"
     c = open(f'{path}', "w")
     writer = csv.writer(c)
     data = ['subgraph','ReliK','sib h','sib t']
@@ -594,62 +673,106 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     '''
     get exact ReliK score
     '''
-    subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
-    if dataset == 'Yago2':
-        head = u
-        tail = v
-    else:
-        head = entity_to_id_map[u]
-        tail = entity_to_id_map[v]
-
-    first_u = True
-    first_v = True
-    for ent in range(alltriples.num_entities):
-        for rel in range(alltriples.num_relations):
-            kg_neg_triple_tuple = (entity_to_id_map[u],rel,ent)
-            if kg_neg_triple_tuple not in all_triples_set:
-                if first_u:
-                    first_u = False
-                    rslt_torch_u = torch.LongTensor([entity_to_id_map[u],rel,ent])
-                    rslt_torch_u = rslt_torch_u.resize_(1,3)
-                else:
-                    rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([entity_to_id_map[u],rel,ent]).resize_(1,3)))
-
-            kg_neg_triple_tuple = (ent,rel,entity_to_id_map[v])
-            if kg_neg_triple_tuple not in all_triples_set:
-                if first_v:
-                    first_v = False
-                    rslt_torch_v = torch.LongTensor([ent,rel,entity_to_id_map[v]])
-                    rslt_torch_v = rslt_torch_v.resize_(1,3)
-                else:
-                    rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([ent,rel,entity_to_id_map[v]]).resize_(1,3)))
-    
-    first = True
-    for tp in list(existing):
-        if first:
-            first = False
-            ex_torch = torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]])
-            ex_torch = ex_torch.resize_(1,3)
+    if parallel_uv is False:
+        subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
+        if dataset == 'Yago2':
+            head = u
+            tail = v
         else:
-            ex_torch = torch.cat((ex_torch, torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]]).resize_(1,3)))
+            head = entity_to_id_map[u]
+            tail = entity_to_id_map[v]
 
-    hRankNeg = 0
-    tRankNeg = 0
-    for i in range(len(models)):
-        comp_score = models[i].score_hrt(ex_torch).cpu()
-        rslt_u_score = models[i].score_hrt(rslt_torch_u)
-        rslt_v_score = models[i].score_hrt(rslt_torch_v)
-        count = 0
-        he_sc = 0
-        ta_sc = 0
-        for tr in comp_score:
-            count += 1
-            he_sc += torch.sum(rslt_u_score > tr).detach().numpy() + 1
-            ta_sc += torch.sum(rslt_v_score > tr).detach().numpy() + 1
-        hRankNeg += (he_sc /len(models))
-        tRankNeg += (ta_sc /len(models))
-    
-    return ( (1/hRankNeg) + (1/tRankNeg) ) /2
+        first_u = True
+        first_v = True
+        for ent in range(alltriples.num_entities):
+            for rel in range(alltriples.num_relations):
+                kg_neg_triple_tuple = (entity_to_id_map[u],rel,ent)
+                if kg_neg_triple_tuple not in all_triples_set:
+                    if first_u:
+                        first_u = False
+                        rslt_torch_u = torch.LongTensor([entity_to_id_map[u],rel,ent])
+                        rslt_torch_u = rslt_torch_u.resize_(1,3)
+                    else:
+                        rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([entity_to_id_map[u],rel,ent]).resize_(1,3)))
+
+                kg_neg_triple_tuple = (ent,rel,entity_to_id_map[v])
+                if kg_neg_triple_tuple not in all_triples_set:
+                    if first_v:
+                        first_v = False
+                        rslt_torch_v = torch.LongTensor([ent,rel,entity_to_id_map[v]])
+                        rslt_torch_v = rslt_torch_v.resize_(1,3)
+                    else:
+                        rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([ent,rel,entity_to_id_map[v]]).resize_(1,3)))
+        
+        first = True
+        for tp in list(existing):
+            if first:
+                first = False
+                ex_torch = torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]])
+                ex_torch = ex_torch.resize_(1,3)
+            else:
+                ex_torch = torch.cat((ex_torch, torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]]).resize_(1,3)))
+
+        hRankNeg = 0
+        tRankNeg = 0
+        for i in range(len(models)):
+            # make sure the model is on GPU
+            models[i].to('cuda')
+
+            comp_score = models[i].score_hrt(ex_torch).cpu()
+            rslt_u_score = models[i].score_hrt(rslt_torch_u)
+            rslt_v_score = models[i].score_hrt(rslt_torch_v)
+            count = 0
+            he_sc = 0
+            ta_sc = 0
+            for tr in comp_score:
+                count += 1
+                he_sc += torch.sum(rslt_u_score > tr).detach().numpy() + 1
+                ta_sc += torch.sum(rslt_v_score > tr).detach().numpy() + 1
+            hRankNeg += (he_sc /len(models))
+            tRankNeg += (ta_sc /len(models))
+        
+        return ( (1/hRankNeg) + (1/tRankNeg) ) /2
+    else:
+        subgraph_list, labels, existing, count, ex_triples = dh.getkHopneighbors(u, v, M)
+        head = u if dataset == 'Yago2' else entity_to_id_map[u]
+        tail = v if dataset == 'Yago2' else entity_to_id_map[v]
+
+        rslt_torch_u = []
+        rslt_torch_v = []
+
+        for ent in range(alltriples.num_entities):
+            for rel in range(alltriples.num_relations):
+                kg_neg_triple_tuple_u = (entity_to_id_map[u], rel, ent)
+                if kg_neg_triple_tuple_u not in all_triples_set:
+                    rslt_torch_u.append([entity_to_id_map[u], rel, ent])
+
+                kg_neg_triple_tuple_v = (ent, rel, entity_to_id_map[v])
+                if kg_neg_triple_tuple_v not in all_triples_set:
+                    rslt_torch_v.append([ent, rel, entity_to_id_map[v]])
+
+        rslt_torch_u = torch.LongTensor(rslt_torch_u).to('cuda')
+        rslt_torch_v = torch.LongTensor(rslt_torch_v).to('cuda')
+
+        ex_torch = torch.LongTensor([[entity_to_id_map[u], relation_to_id_map[tp], entity_to_id_map[v]] for tp in existing]).to('cuda')
+
+        hRankNeg = 0
+        tRankNeg = 0
+
+        for model in models:
+            model.to('cuda')
+
+            comp_score = model.score_hrt(ex_torch)
+            rslt_u_score = model.score_hrt(rslt_torch_u)
+            rslt_v_score = model.score_hrt(rslt_torch_v)
+
+            he_sc = torch.sum(rslt_u_score > comp_score.unsqueeze(1), dim=1).sum().item() + len(comp_score)
+            ta_sc = torch.sum(rslt_v_score > comp_score.unsqueeze(1), dim=1).sum().item() + len(comp_score)
+
+            hRankNeg += he_sc / len(models)
+            tRankNeg += ta_sc / len(models)
+
+        return torch.tensor([(1 / hRankNeg + 1 / tRankNeg) / 2], device='cuda')
 
 def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], alltriples: TriplesFactory, sample: float, dataset: str) -> float:
     '''
