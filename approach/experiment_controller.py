@@ -115,7 +115,14 @@ def grabAllKFold(datasetname: str, n_split: int, embeddingname: str = 'TransE'):
     if not isExist:
         dh.generateKFoldSplit(full_dataset, datasetname, random_seed=None, n_split=nmb_KFold)
     full_dataset = torch.cat((all_triples, test_triples.mapped_triples, validation_triples.mapped_triples))
+
     full_graph = TriplesFactory(full_dataset,entity_to_id=entity_to_id_map,relation_to_id=relation_to_id_map)
+
+    # Need to store the ids of all positive triples on GPU
+    global all_triple_id_torch
+    all_triple_id_torch = encode_triples_to_id(full_dataset, full_graph.num_entities, full_graph.num_relations)
+    all_triple_id_torch = all_triple_id_torch.to('cuda')
+    #print("check: ", full_dataset.device, all_triple_id_torch.device)
 
     emb_train_triples = []
     emb_test_triples = []
@@ -172,7 +179,7 @@ def KFoldNegGen(datasetname: str, n_split: int, all_triples_set, LP_triples_pos,
 
 import multiprocessing as mp
 
-parallel_uv = True
+parallel_uv = False
 
 def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname, results):
     #count = 0
@@ -189,7 +196,13 @@ def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, r
         sib_sum_t += w2
 
     results.append((sib_sum, sib_sum_h, sib_sum_t))
-    
+
+getkHopneighbors_time = 0.0
+sample_time = 0.0
+entity_relation_loop_time = 0.0
+model_loop_time = 0.0
+sample_first_while_time = 0.0
+sample_second_while_time = 0.0
 
 def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, heur):
     '''
@@ -215,6 +228,11 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
     model_ReliK_score_h = []
     model_ReliK_score_t = []
     tracker = 0
+
+    global perm_entities, perm_relations
+    perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+
+    #print(full_graph.num_triples, full_graph.num_entities)
     ### HERE!!!
     if parallel_uv is False:
         #start_time_enum_subgraph = timeit.default_timer()
@@ -231,7 +249,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
                 sib_sum_h += w1
                 sib_sum_t += w2
             end_uv = timeit.default_timer()
-            print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}')
+            print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}, with {count} edges')
 
             sib_sum = sib_sum/count
             sib_sum_h = sib_sum_h/count
@@ -240,7 +258,13 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             model_ReliK_score_h.append(sib_sum_h)
             model_ReliK_score_t.append(sib_sum_t)
             tracker += 1
-            if tracker % 10 == 0: print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+            if tracker % 10 == 0:
+                print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+        print(f"Total time for dh.getkHopneighbors: {getkHopneighbors_time} seconds")
+        print(f"Total time for sampling: {sample_time} seconds")
+        print(f"Total time for model loop: {model_loop_time} seconds")
+        print(f"Total time for sample first while loop: {sample_first_while_time} seconds")
+        print(f"Total time for sample second while loop: {sample_second_while_time} seconds")
         #end_time_enum_subgraph = timeit.default_timer()
         #print(f'Enum subgraph time: {end_time_enum_subgraph - start_time_enum_subgraph}')
     else: # parallel_uv = True
@@ -288,7 +312,13 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             model_ReliK_score_h.append(sib_sum_h)
             model_ReliK_score_t.append(sib_sum_t)
             tracker += 1
-            if tracker % 10 == 0: print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+            if tracker % 10 == 0:
+                print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+        print(f"Total time for dh.getkHopneighbors: {getkHopneighbors_time} seconds")
+        print(f"Total time for sampling: {sample_time} seconds")
+        print(f"Total time for model loop: {model_loop_time} seconds")
+        print(f"Total time for sample first while loop: {sample_first_while_time} seconds")
+        print(f"Total time for sample second while loop: {sample_second_while_time} seconds")
 
     path = f"approach/scoreData/{datasetname}_{n_split}/{embedding}/ReliK_score_subgraphs_{size_subgraph}.csv"
     if parallel_uv is True:
@@ -673,113 +703,108 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     '''
     get exact ReliK score
     '''
-    if parallel_uv is False:
-        subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
-        if dataset == 'Yago2':
-            head = u
-            tail = v
-        else:
-            head = entity_to_id_map[u]
-            tail = entity_to_id_map[v]
+    global getkHopneighbors_time
+    global entity_relation_loop_time
+    global model_loop_time
 
-        first_u = True
-        first_v = True
-        for ent in range(alltriples.num_entities):
-            for rel in range(alltriples.num_relations):
-                kg_neg_triple_tuple = (entity_to_id_map[u],rel,ent)
-                if kg_neg_triple_tuple not in all_triples_set:
-                    if first_u:
-                        first_u = False
-                        rslt_torch_u = torch.LongTensor([entity_to_id_map[u],rel,ent])
-                        rslt_torch_u = rslt_torch_u.resize_(1,3)
-                    else:
-                        rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([entity_to_id_map[u],rel,ent]).resize_(1,3)))
+    start_time = timeit.default_timer() #profiling 1
+    subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
+    end_time = timeit.default_timer()
+    getkHopneighbors_time += end_time - start_time #profiling 1
 
-                kg_neg_triple_tuple = (ent,rel,entity_to_id_map[v])
-                if kg_neg_triple_tuple not in all_triples_set:
-                    if first_v:
-                        first_v = False
-                        rslt_torch_v = torch.LongTensor([ent,rel,entity_to_id_map[v]])
-                        rslt_torch_v = rslt_torch_v.resize_(1,3)
-                    else:
-                        rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([ent,rel,entity_to_id_map[v]]).resize_(1,3)))
-        
-        first = True
-        for tp in list(existing):
-            if first:
-                first = False
-                ex_torch = torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]])
-                ex_torch = ex_torch.resize_(1,3)
-            else:
-                ex_torch = torch.cat((ex_torch, torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]]).resize_(1,3)))
-
-        hRankNeg = 0
-        tRankNeg = 0
-        for i in range(len(models)):
-            # make sure the model is on GPU
-            models[i].to('cuda')
-
-            comp_score = models[i].score_hrt(ex_torch).cpu()
-            rslt_u_score = models[i].score_hrt(rslt_torch_u)
-            rslt_v_score = models[i].score_hrt(rslt_torch_v)
-            count = 0
-            he_sc = 0
-            ta_sc = 0
-            for tr in comp_score:
-                count += 1
-                he_sc += torch.sum(rslt_u_score > tr).detach().numpy() + 1
-                ta_sc += torch.sum(rslt_v_score > tr).detach().numpy() + 1
-            hRankNeg += (he_sc /len(models))
-            tRankNeg += (ta_sc /len(models))
-        
-        return ( (1/hRankNeg) + (1/tRankNeg) ) /2
+    if dataset == 'Yago2':
+        head = u
+        tail = v
     else:
-        subgraph_list, labels, existing, count, ex_triples = dh.getkHopneighbors(u, v, M)
-        head = u if dataset == 'Yago2' else entity_to_id_map[u]
-        tail = v if dataset == 'Yago2' else entity_to_id_map[v]
+        head = entity_to_id_map[u]
+        tail = entity_to_id_map[v]
 
-        rslt_torch_u = []
-        rslt_torch_v = []
+    first_u = True
+    first_v = True
 
-        for ent in range(alltriples.num_entities):
-            for rel in range(alltriples.num_relations):
-                kg_neg_triple_tuple_u = (entity_to_id_map[u], rel, ent)
-                if kg_neg_triple_tuple_u not in all_triples_set:
-                    rslt_torch_u.append([entity_to_id_map[u], rel, ent])
+    start_time = timeit.default_timer() #profiling 2
+    for ent in range(alltriples.num_entities):
+        for rel in range(alltriples.num_relations):
+            kg_neg_triple_tuple = (entity_to_id_map[u],rel,ent)
+            if kg_neg_triple_tuple not in all_triples_set:
+                if first_u:
+                    first_u = False
+                    rslt_torch_u = torch.LongTensor([entity_to_id_map[u],rel,ent])
+                    rslt_torch_u = rslt_torch_u.resize_(1,3)
+                else:
+                    rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([entity_to_id_map[u],rel,ent]).resize_(1,3)))
 
-                kg_neg_triple_tuple_v = (ent, rel, entity_to_id_map[v])
-                if kg_neg_triple_tuple_v not in all_triples_set:
-                    rslt_torch_v.append([ent, rel, entity_to_id_map[v]])
+            kg_neg_triple_tuple = (ent,rel,entity_to_id_map[v])
+            if kg_neg_triple_tuple not in all_triples_set:
+                if first_v:
+                    first_v = False
+                    rslt_torch_v = torch.LongTensor([ent,rel,entity_to_id_map[v]])
+                    rslt_torch_v = rslt_torch_v.resize_(1,3)
+                else:
+                    rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([ent,rel,entity_to_id_map[v]]).resize_(1,3)))
+    
+    end_time = timeit.default_timer()
+    entity_relation_loop_time += end_time - start_time #profiling 2
 
-        rslt_torch_u = torch.LongTensor(rslt_torch_u).to('cuda')
-        rslt_torch_v = torch.LongTensor(rslt_torch_v).to('cuda')
+    first = True
+    for tp in list(existing):
+        if first:
+            first = False
+            ex_torch = torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]])
+            ex_torch = ex_torch.resize_(1,3)
+        else:
+            ex_torch = torch.cat((ex_torch, torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]]).resize_(1,3)))
 
-        ex_torch = torch.LongTensor([[entity_to_id_map[u], relation_to_id_map[tp], entity_to_id_map[v]] for tp in existing]).to('cuda')
+    hRankNeg = 0
+    tRankNeg = 0
 
-        hRankNeg = 0
-        tRankNeg = 0
+    start_time = timeit.default_timer() #profiling 3
+    for i in range(len(models)):
+        # make sure the model is on GPU
+        models[i].to('cuda')
 
-        for model in models:
-            model.to('cuda')
+        comp_score = models[i].score_hrt(ex_torch).cpu()
+        rslt_u_score = models[i].score_hrt(rslt_torch_u)
+        rslt_v_score = models[i].score_hrt(rslt_torch_v)
+        count = 0
+        he_sc = 0
+        ta_sc = 0
+        for tr in comp_score:
+            count += 1
+            he_sc += torch.sum(rslt_u_score > tr).detach().numpy() + 1
+            ta_sc += torch.sum(rslt_v_score > tr).detach().numpy() + 1
+        hRankNeg += (he_sc /len(models))
+        tRankNeg += (ta_sc /len(models))
+    
+    end_time = timeit.default_timer()
+    model_loop_time += end_time - start_time #profiling 3
+    print(getkHopneighbors_time, entity_relation_loop_time, model_loop_time)
+    
+    return ( (1/hRankNeg) + (1/tRankNeg) ) /2
 
-            comp_score = model.score_hrt(ex_torch)
-            rslt_u_score = model.score_hrt(rslt_torch_u)
-            rslt_v_score = model.score_hrt(rslt_torch_v)
 
-            he_sc = torch.sum(rslt_u_score > comp_score.unsqueeze(1), dim=1).sum().item() + len(comp_score)
-            ta_sc = torch.sum(rslt_v_score > comp_score.unsqueeze(1), dim=1).sum().item() + len(comp_score)
+# We need a more fine grained profiling to understand the bottlenecks in sampling
+random_choice_time = 0.0
 
-            hRankNeg += he_sc / len(models)
-            tRankNeg += ta_sc / len(models)
-
-        return torch.tensor([(1 / hRankNeg + 1 / tRankNeg) / 2], device='cuda')
 
 def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], alltriples: TriplesFactory, sample: float, dataset: str) -> float:
     '''
     get approximate ReliK score with binomial approximation
     '''
     #list(map(random.choice, map(list, list_of_sets)))
+
+    global getkHopneighbors_time
+    global sample_time
+    global model_loop_time
+    global sample_first_while_time
+    global sample_second_while_time
+
+    start_time = timeit.default_timer() # profiling 1
     subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
+    end_time = timeit.default_timer() # profiling 1
+    getkHopneighbors_time += end_time - start_time # profiling 1
+
+    start_time = timeit.default_timer() # profiling 2
     #print(entity_to_id_map)
     #subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(entity_to_id_map[u],entity_to_id_map[v],M)
     if sample > 0.4:
@@ -837,9 +862,14 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
         len_uu = alltriples.num_entities*alltriples.num_relations
         len_vv = alltriples.num_entities*alltriples.num_relations
         first = True
+        start_first_while = timeit.default_timer() # profiling 4
         while len(allset_u) < min(len_uu*sample,1000):
+
             kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
+            
+            # optimization: sampling without replacement
             kg_neg_triple_tuple = (entity_to_id_map[u], kg_neg_triple_tuple[0], kg_neg_triple_tuple[1])
+            
             if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
                 if first:
                     first = False
@@ -848,8 +878,15 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
                 else:
                     rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
                 allset_u.add(kg_neg_triple_tuple)
+        #print(len(rslt_torch_u))
+
+        end_first_while = timeit.default_timer() # profiling 4
+        sample_first_while_time += end_first_while - start_first_while # profiling 4
 
         first = True
+
+        start_second_while = timeit.default_timer() # profiling 5
+
         while len(allset_v) < min(len_vv*sample,1000):
             kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
             kg_neg_triple_tuple = (kg_neg_triple_tuple[1], kg_neg_triple_tuple[0], entity_to_id_map[v])
@@ -857,10 +894,20 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
                 if first:
                     first = False
                     rslt_torch_v = torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]])
-                    rslt_torch_v = rslt_torch_u.resize_(1,3)
+                    rslt_torch_v = rslt_torch_v.resize_(1,3)
                 else:
-                    rslt_torch_v = torch.cat((rslt_torch_u, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
+                    rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
                 allset_v.add(kg_neg_triple_tuple)
+        
+
+        end_second_while = timeit.default_timer() # profiling 5
+        sample_second_while_time += end_second_while - start_second_while # profiling 5
+
+    #print(len(rslt_torch_u))
+    #print(rslt_torch_v)
+
+    end_time = timeit.default_timer() # profiling 2
+    sample_time += end_time - start_time # profiling 2
 
     first = True
     for tp in list(existing):
@@ -873,6 +920,8 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
 
     hRankNeg = 0
     tRankNeg = 0
+
+    start_time = timeit.default_timer() # profiling 3
     for i in range(len(models)):
         comp_score = models[i].score_hrt(ex_torch).cpu()
         rslt_u_score = models[i].score_hrt(rslt_torch_u)
@@ -886,7 +935,251 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
             ta_sc += torch.sum(rslt_v_score > tr).detach().numpy() + 1
         hRankNeg += ((he_sc / len(allset_u))/len(models)) * len_uu
         tRankNeg += ((ta_sc / len(allset_v))/len(models)) * len_vv
-                   
+    end_time = timeit.default_timer() # profiling 3
+    model_loop_time += end_time - start_time # profiling 3
+
+    #print(( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg)
+    return ( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg
+
+# this is the optimized version of the binomial approximation
+
+def pre_randperm(num_entities: int, num_relations: int, device='cuda') -> torch.Tensor:
+    perm_entities = torch.randperm(num_entities, device=device)
+    perm_relations = torch.randperm(num_relations, device=device)
+    return perm_entities, perm_relations
+
+perm_entities = None
+perm_relations = None
+all_triple_id_torch = None
+
+#sampled_indices_only_once = None
+
+def encode_triples_to_id(triples, entity_count: int, relation_count: int, device='cuda') -> torch.tensor:
+    #print("here: ", triples.device)
+    entity1, relation, entity2 = triples[:, 0], triples[:, 1], triples[:, 2]
+    return entity1 * relation_count * entity_count + relation * entity_count + entity2
+
+def decode_id_to_tensor(encoded_ids, entity_count: int, relation_count: int, device='cuda') -> torch.tensor:
+    entity1 = encoded_ids // (relation_count * entity_count)
+    remaining = encoded_ids % (relation_count * entity_count)
+    relation = remaining // entity_count
+    entity2 = remaining % entity_count
+    triple_tensor = torch.stack((entity1, relation, entity2), dim=-1)
+    return triple_tensor
+
+def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, 
+             relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], 
+             alltriples: TriplesFactory, sample: float, dataset: str, device='cuda') -> float:
+    '''
+    Get approximate ReliK score with binomial approximation (optimized sampling)
+    '''
+    #list(map(random.choice, map(list, list_of_sets)))
+
+    global getkHopneighbors_time
+    global sample_time
+    global model_loop_time
+    global sample_first_while_time
+    global sample_second_while_time
+    global perm_entities
+    global perm_relations
+
+    start_time = timeit.default_timer() # profiling 1
+    subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
+    end_time = timeit.default_timer() # profiling 1
+    getkHopneighbors_time += end_time - start_time # profiling 1
+
+    start_time = timeit.default_timer() # profiling 2
+    #print(entity_to_id_map)
+    #subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(entity_to_id_map[u],entity_to_id_map[v],M)
+    if sample > 0.4:
+        allset_uu = set(itertools.product([entity_to_id_map[u]],range(alltriples.num_relations),range(alltriples.num_entities)))
+        allset_vv = set(itertools.product(range(alltriples.num_entities),range(alltriples.num_relations),[entity_to_id_map[v]]))
+        len_uu = len(allset_uu.difference(all_triples_set))
+        len_vv = len(allset_vv.difference(all_triples_set))
+
+        allset = set()
+        allset_u = set()
+        allset_v = set()
+        
+        lst_emb = list(range(alltriples.num_entities))
+        lst_emb_r = list(range(alltriples.num_relations))
+
+        first = True
+        count = 0
+        while len(allset_u) < min(len_uu*sample,1000):
+            #count += 1
+            relation = random.choice(lst_emb_r)
+            tail = random.choice(lst_emb)
+            kg_neg_triple_tuple = (entity_to_id_map[u],relation,tail)
+            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
+                if first:
+                    first = False
+                    rslt_torch_u = torch.LongTensor([entity_to_id_map[u],relation,tail])
+                    rslt_torch_u = rslt_torch_u.resize_(1,3)
+                else:
+                    rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([entity_to_id_map[u],relation,tail]).resize_(1,3)))
+                allset_u.add(kg_neg_triple_tuple)
+            else:
+                count += 1
+            #if count == len_uu*sample:#min(len_uu*sample,1000):
+            #    break
+        count = 0
+        first = True
+        while len(allset_v) < min(len_vv*sample,1000):
+            #count += 1
+            relation = random.choice(lst_emb_r)
+            head = random.choice(lst_emb)
+            kg_neg_triple_tuple = (head,relation,entity_to_id_map[v])
+            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_v:
+                if first:
+                    first = False
+                    rslt_torch_v = torch.LongTensor([head,relation,entity_to_id_map[v]])
+                    rslt_torch_v = rslt_torch_v.resize_(1,3)
+                else:
+                    rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([head,relation,entity_to_id_map[v]]).resize_(1,3)))
+                allset_v.add(kg_neg_triple_tuple)
+            else:
+                count += 1
+    else:
+        allset_u = set()
+        allset_v = set()
+        len_uu = alltriples.num_entities*alltriples.num_relations
+        len_vv = alltriples.num_entities*alltriples.num_relations
+        first = True
+        start_first_while = timeit.default_timer() # profiling 4
+        """
+        while len(allset_u) < min(len_uu*sample,1000):
+            kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
+            
+            # optimization: sampling without replacement
+            kg_neg_triple_tuple = (entity_to_id_map[u], kg_neg_triple_tuple[0], kg_neg_triple_tuple[1])
+            
+            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
+                if first:
+                    first = False
+                    rslt_torch_u = torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]])
+                    rslt_torch_u = rslt_torch_u.resize_(1,3)
+                else:
+                    rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
+                allset_u.add(kg_neg_triple_tuple)
+        """
+        # Directly sample 20% more indices without checking for negativities
+        # Also assume there is no duplicates in sampling_tensor
+
+        target_length = int(min(len_uu*sample, 1000) * 1.2)
+        global perm_relations, perm_entities, all_triple_id_torch
+
+        # WARNING: Assuming that the number of entities and relations is relatively prime
+        entity_repeats = (target_length + len(perm_entities) - 1) // len(perm_entities)
+        relation_repeats = (target_length + len(perm_relations) - 1) // len(perm_relations)
+        
+        head_cycle = torch.full((target_length,), entity_to_id_map[u], device=device)
+        entity_cycle = perm_entities.repeat(entity_repeats)[:target_length]
+        relation_cycle = perm_relations.repeat(relation_repeats)[:target_length]
+
+        # stack the indices
+        sampling_tensor = torch.stack([head_cycle, relation_cycle, entity_cycle], dim=1)
+
+        sampling_triple_id = encode_triples_to_id(sampling_tensor, alltriples.num_entities, alltriples.num_relations, device='cuda')
+
+
+        #compareview = all_triple_id_torch.repeat(sampling_triple_id.shape[0], 1).T.to(device)
+
+        #print(sampling_triple_id.device, all_triple_id_torch.device)
+
+        # Non-intersection (sampling except positive)
+        
+        only_negative_triples = torch.tensor(sampling_triple_id[~torch.isin(sampling_triple_id, all_triple_id_torch)],device=device)
+
+        allset_u = decode_id_to_tensor(only_negative_triples, alltriples.num_entities, alltriples.num_relations)
+
+        #print(len(rslt_torch_u))
+        #print(rslt_torch_u[:5])
+
+        end_first_while = timeit.default_timer() # profiling 4
+        sample_first_while_time += end_first_while - start_first_while # profiling 4
+
+        first = True
+
+        start_second_while = timeit.default_timer() # profiling 5
+        """
+        while len(allset_v) < min(len_vv*sample,1000):
+            kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
+            kg_neg_triple_tuple = (kg_neg_triple_tuple[1], kg_neg_triple_tuple[0], entity_to_id_map[v])
+            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
+                if first:
+                    first = False
+                    rslt_torch_v = torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]])
+                    rslt_torch_v = rslt_torch_v.resize_(1,3)
+                else:
+                    rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
+                allset_v.add(kg_neg_triple_tuple)
+        """
+        # Directly sample 20% more indices without checking for negativities
+        # Also assume there is no duplicates in sampling_tensor
+
+        target_length = int(min(len_vv*sample, 1000) * 1.2)
+        #global perm_relations, perm_entities, all_triple_id_torch
+
+        # WARNING: Assuming that the number of entities and relations is relatively prime
+        entity_repeats = (target_length + len(perm_entities) - 1) // len(perm_entities)
+        relation_repeats = (target_length + len(perm_relations) - 1) // len(perm_relations)
+
+        tail_cycle = torch.full((target_length,), entity_to_id_map[v], device=device)
+        entity_cycle = perm_entities.repeat(entity_repeats)[:target_length]
+        relation_cycle = perm_relations.repeat(relation_repeats)[:target_length]
+
+        # stack the indices
+        sampling_tensor = torch.stack([entity_cycle, relation_cycle, tail_cycle], dim=1)
+
+        sampling_triple_id = encode_triples_to_id(sampling_tensor, alltriples.num_entities, alltriples.num_relations, device='cuda')
+
+        # Non-intersection (sampling except positive)
+
+        only_negative_triples = torch.tensor(sampling_triple_id[~torch.isin(sampling_triple_id, all_triple_id_torch)],device=device)
+
+        allset_v = decode_id_to_tensor(only_negative_triples, alltriples.num_entities, alltriples.num_relations)
+
+        end_second_while = timeit.default_timer() # profiling 5
+        sample_second_while_time += end_second_while - start_second_while # profiling 5
+
+    rslt_torch_u = allset_u
+    rslt_torch_v = allset_v
+
+    end_time = timeit.default_timer() # profiling 2
+    sample_time += end_time - start_time # profiling 2
+
+    first = True
+    for tp in list(existing):
+        if first:
+            first = False
+            ex_torch = torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]])
+            ex_torch = ex_torch.resize_(1,3)
+        else:
+            ex_torch = torch.cat((ex_torch, torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]]).resize_(1,3)))
+
+    hRankNeg = 0
+    tRankNeg = 0
+
+
+    start_time = timeit.default_timer() # profiling 3
+    for i in range(len(models)):
+        comp_score = models[i].score_hrt(ex_torch).cpu()
+        rslt_u_score = models[i].score_hrt(rslt_torch_u)
+        rslt_v_score = models[i].score_hrt(rslt_torch_v)
+        count = 0
+        he_sc = 0
+        ta_sc = 0
+        for tr in comp_score:
+            count += 1
+            he_sc += torch.sum(rslt_u_score > tr).detach().numpy() + 1
+            ta_sc += torch.sum(rslt_v_score > tr).detach().numpy() + 1
+        hRankNeg += ((he_sc / len(allset_u))/len(models)) * len_uu
+        tRankNeg += ((ta_sc / len(allset_v))/len(models)) * len_vv
+    end_time = timeit.default_timer() # profiling 3
+    model_loop_time += end_time - start_time # profiling 3
+
+    #print(( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg)
     return ( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg
 
 def lower_bound(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], alltriples: TriplesFactory, sample: float, dataset: str) -> float:
@@ -1155,6 +1448,10 @@ if __name__ == "__main__":
             heuristic = lower_bound
         if heuristic == 'RR':
             heuristic = RR
+        # add test for cuda optimization for binomial
+        if heuristic == 'binomial-cuda':
+            heuristic = binomial_cuda
+            ratio = 0.1
     else:
         heuristic = binomial
         ratio = 0.1
