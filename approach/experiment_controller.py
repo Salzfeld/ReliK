@@ -208,7 +208,13 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
     '''
     compute the ReliK score on all subgraphs according to chosen heuristic
     '''
-    
+    global getkHopneighbors_time, sample_time, entity_relation_loop_time, model_loop_time, sample_first_while_time, sample_second_while_time
+    getkHopneighbors_time = 0.0
+    sample_time = 0.0
+    entity_relation_loop_time = 0.0
+    model_loop_time = 0.0
+    sample_first_while_time = 0.0
+    sample_second_while_time = 0.0
     df = pd.DataFrame(full_graph.triples, columns=['subject', 'predicate', 'object'])
     M = nx.MultiDiGraph()
 
@@ -761,7 +767,7 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     start_time = timeit.default_timer() #profiling 3
     for i in range(len(models)):
         # make sure the model is on GPU
-        models[i].to('cuda')
+        #models[i].to('cuda')
 
         comp_score = models[i].score_hrt(ex_torch).cpu()
         rslt_u_score = models[i].score_hrt(rslt_torch_u)
@@ -778,9 +784,9 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     
     end_time = timeit.default_timer()
     model_loop_time += end_time - start_time #profiling 3
-    print(getkHopneighbors_time, entity_relation_loop_time, model_loop_time)
+    # print(getkHopneighbors_time, entity_relation_loop_time, model_loop_time)
     
-    return ( (1/hRankNeg) + (1/tRankNeg) ) /2
+    return ( (1/hRankNeg) + (1/tRankNeg) ) /2, 1/hRankNeg, 1/tRankNeg
 
 
 # We need a more fine grained profiling to understand the bottlenecks in sampling
@@ -955,7 +961,6 @@ all_triple_id_torch = None
 #sampled_indices_only_once = None
 
 def encode_triples_to_id(triples, entity_count: int, relation_count: int, device='cuda') -> torch.tensor:
-    #print("here: ", triples.device)
     entity1, relation, entity2 = triples[:, 0], triples[:, 1], triples[:, 2]
     return entity1 * relation_count * entity_count + relation * entity_count + entity2
 
@@ -991,6 +996,8 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     start_time = timeit.default_timer() # profiling 2
     #print(entity_to_id_map)
     #subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(entity_to_id_map[u],entity_to_id_map[v],M)
+    """
+    # Just ignore this part
     if sample > 0.4:
         allset_uu = set(itertools.product([entity_to_id_map[u]],range(alltriples.num_relations),range(alltriples.num_entities)))
         allset_vv = set(itertools.product(range(alltriples.num_entities),range(alltriples.num_relations),[entity_to_id_map[v]]))
@@ -1041,6 +1048,8 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
             else:
                 count += 1
     else:
+        """
+    if sample >= 0:
         allset_u = set()
         allset_v = set()
         len_uu = alltriples.num_entities*alltriples.num_relations
@@ -1089,7 +1098,7 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
 
         # Non-intersection (sampling except positive)
         
-        only_negative_triples = torch.tensor(sampling_triple_id[~torch.isin(sampling_triple_id, all_triple_id_torch)],device=device)
+        only_negative_triples = sampling_triple_id[~torch.isin(sampling_triple_id, all_triple_id_torch)].clone().detach()
 
         allset_u = decode_id_to_tensor(only_negative_triples, alltriples.num_entities, alltriples.num_relations)
 
@@ -1136,7 +1145,7 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
 
         # Non-intersection (sampling except positive)
 
-        only_negative_triples = torch.tensor(sampling_triple_id[~torch.isin(sampling_triple_id, all_triple_id_torch)],device=device)
+        only_negative_triples = sampling_triple_id[~torch.isin(sampling_triple_id, all_triple_id_torch)].clone().detach()
 
         allset_v = decode_id_to_tensor(only_negative_triples, alltriples.num_entities, alltriples.num_relations)
 
@@ -1512,6 +1521,40 @@ if __name__ == "__main__":
     tstamp_tpc = -1
     tstamp_den = -1
 
+    if 'time-measure' in task_list:
+        print('start with time measure')
+
+        path = f"approach/scoreData/time_measures_{args.embedding}_{args.dataset_name}_{args.heuristic}_approx.csv"
+        ex = os.path.isfile(path)
+        c = open(f'{path}', "a+")
+        writer = csv.writer(c)
+        """
+        start = timeit.default_timer()
+        densestSubgraph(args.dataset_name, args.embedding, getReliKScore, ratio, models)
+        end = timeit.default_timer()
+        data = ['accurate', ratio, end-start]
+        writer.writerow(data)
+        """
+        for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]:
+            ratio = rat
+            print(f'sampling ratio = {ratio}')
+            start = timeit.default_timer()
+            DoGlobalReliKScore(args.embedding, args.dataset_name, nmb_KFold, size_subgraphs, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, ratio, heuristic)
+            end = timeit.default_timer()
+            data = [f'{args.heuristic}', ratio, end-start]
+            print(data)
+            writer.writerow(data)
+            """
+            start = timeit.default_timer()
+            densestSubgraph(args.dataset_name, args.embedding, binomial, ratio, models)
+            end = timeit.default_timer()
+            data = ['binomial', ratio, end-start]
+            writer.writerow(data)
+            """
+        c.close()
+        exit()
+
+        print('end with time measure')
     if 'ReliK' in task_list:
         print('start with ReliK')
         start = timeit.default_timer()
