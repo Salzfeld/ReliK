@@ -1539,7 +1539,9 @@ if __name__ == "__main__":
             ratio = rat
             print(f'sampling ratio = {ratio}')
             start = timeit.default_timer()
-            DoGlobalReliKScore(args.embedding, args.dataset_name, nmb_KFold, size_subgraphs, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, ratio, heuristic)
+            # DoGlobalReliKScore(args.embedding, args.dataset_name, nmb_KFold, size_subgraphs, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, ratio, heuristic)
+            perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+            densestSubgraph(args.dataset_name, args.embedding, heuristic, ratio, models)
             end = timeit.default_timer()
             data = [f'{args.heuristic}', ratio, end-start]
             print(data)
