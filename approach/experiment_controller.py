@@ -828,7 +828,8 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
 
         first = True
         count = 0
-        while len(allset_u) < min(len_uu*sample,1000):
+        while len(allset_u) < len_uu * sample:
+        #while len(allset_u) < min(len_uu*sample,1000):
             #count += 1
             relation = random.choice(lst_emb_r)
             tail = random.choice(lst_emb)
@@ -847,7 +848,8 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
             #    break
         count = 0
         first = True
-        while len(allset_v) < min(len_vv*sample,1000):
+        while len(allset_v) < len_vv * sample:
+        #while len(allset_v) < min(len_vv*sample,1000):
             #count += 1
             relation = random.choice(lst_emb_r)
             head = random.choice(lst_emb)
@@ -869,7 +871,9 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
         len_vv = alltriples.num_entities*alltriples.num_relations
         first = True
         start_first_while = timeit.default_timer() # profiling 4
-        while len(allset_u) < min(len_uu*sample,1000):
+        
+        while len(allset_u) < len_uu * sample:
+        #while len(allset_u) < min(len_uu*sample,1000):
 
             kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
             
@@ -893,7 +897,8 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
 
         start_second_while = timeit.default_timer() # profiling 5
 
-        while len(allset_v) < min(len_vv*sample,1000):
+        while len(allset_v) < len_vv * sample:
+        #while len(allset_v) < min(len_vv*sample,1000):
             kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
             kg_neg_triple_tuple = (kg_neg_triple_tuple[1], kg_neg_triple_tuple[0], entity_to_id_map[v])
             if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
@@ -1075,7 +1080,8 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         # Directly sample 20% more indices without checking for negativities
         # Also assume there is no duplicates in sampling_tensor
 
-        target_length = int(min(len_uu*sample, 1000) * 1.2)
+        target_length = int(len_uu * sample * 1.2)
+        #target_length = int(min(len_uu*sample, 1000) * 1.2)
         global perm_relations, perm_entities, all_triple_id_torch
 
         # WARNING: Assuming that the number of entities and relations is relatively prime
@@ -1126,8 +1132,9 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         """
         # Directly sample 20% more indices without checking for negativities
         # Also assume there is no duplicates in sampling_tensor
-
-        target_length = int(min(len_vv*sample, 1000) * 1.2)
+        
+        target_length = int(len_vv * sample * 1.2)
+        #target_length = int(min(len_vv*sample, 1000) * 1.2)
         #global perm_relations, perm_entities, all_triple_id_torch
 
         # WARNING: Assuming that the number of entities and relations is relatively prime
@@ -1535,7 +1542,8 @@ if __name__ == "__main__":
         data = ['accurate', ratio, end-start]
         writer.writerow(data)
         """
-        for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]:
+        #for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]:
+        for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7]:
             ratio = rat
             print(f'sampling ratio = {ratio}')
             start = timeit.default_timer()
