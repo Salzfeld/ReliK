@@ -177,9 +177,10 @@ def KFoldNegGen(datasetname: str, n_split: int, all_triples_set, LP_triples_pos,
     return LP_triples_neg
 ### Focus on this function
 
-import multiprocessing as mp
+#import multiprocessing as mp
+import torch.multiprocessing as mp
 
-parallel_uv = False
+parallel_uv = True
 
 def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname, results):
     #count = 0
@@ -275,6 +276,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
         #print(f'Enum subgraph time: {end_time_enum_subgraph - start_time_enum_subgraph}')
     else: # parallel_uv = True
         # Try to use multi processors
+        mp.set_start_method('spawn', force=True)
         for subgraph in subgraphs:
             count = 0
             sib_sum = 0
@@ -307,7 +309,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             sib_sum_h = sum([r[1] for r in results])
             sib_sum_t = sum([r[2] for r in results])
             #print(sib_sum, sib_sum_h, sib_sum_t)
-
+            
             end_uv = timeit.default_timer()
             print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}')
 
@@ -1001,59 +1003,6 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     start_time = timeit.default_timer() # profiling 2
     #print(entity_to_id_map)
     #subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(entity_to_id_map[u],entity_to_id_map[v],M)
-    """
-    # Just ignore this part
-    if sample > 0.4:
-        allset_uu = set(itertools.product([entity_to_id_map[u]],range(alltriples.num_relations),range(alltriples.num_entities)))
-        allset_vv = set(itertools.product(range(alltriples.num_entities),range(alltriples.num_relations),[entity_to_id_map[v]]))
-        len_uu = len(allset_uu.difference(all_triples_set))
-        len_vv = len(allset_vv.difference(all_triples_set))
-
-        allset = set()
-        allset_u = set()
-        allset_v = set()
-        
-        lst_emb = list(range(alltriples.num_entities))
-        lst_emb_r = list(range(alltriples.num_relations))
-
-        first = True
-        count = 0
-        while len(allset_u) < min(len_uu*sample,1000):
-            #count += 1
-            relation = random.choice(lst_emb_r)
-            tail = random.choice(lst_emb)
-            kg_neg_triple_tuple = (entity_to_id_map[u],relation,tail)
-            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
-                if first:
-                    first = False
-                    rslt_torch_u = torch.LongTensor([entity_to_id_map[u],relation,tail])
-                    rslt_torch_u = rslt_torch_u.resize_(1,3)
-                else:
-                    rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([entity_to_id_map[u],relation,tail]).resize_(1,3)))
-                allset_u.add(kg_neg_triple_tuple)
-            else:
-                count += 1
-            #if count == len_uu*sample:#min(len_uu*sample,1000):
-            #    break
-        count = 0
-        first = True
-        while len(allset_v) < min(len_vv*sample,1000):
-            #count += 1
-            relation = random.choice(lst_emb_r)
-            head = random.choice(lst_emb)
-            kg_neg_triple_tuple = (head,relation,entity_to_id_map[v])
-            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_v:
-                if first:
-                    first = False
-                    rslt_torch_v = torch.LongTensor([head,relation,entity_to_id_map[v]])
-                    rslt_torch_v = rslt_torch_v.resize_(1,3)
-                else:
-                    rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([head,relation,entity_to_id_map[v]]).resize_(1,3)))
-                allset_v.add(kg_neg_triple_tuple)
-            else:
-                count += 1
-    else:
-        """
     if sample >= 0:
         allset_u = set()
         allset_v = set()
@@ -1349,6 +1298,8 @@ def densestSubgraph(datasetname, embedding, score_calculation, sample, models):
                 pct += 1
                 now = timeit.default_timer()
                 print(f'Finished with {pct}% for {datasetname} in time {now-start}, took avg of {(now-start)/pct} per point')
+            if(pct == 5):
+                break
 
         weighted_graph: list[tuple[str,str,float]] = []
         for u,v,data in G.edges(data=True):
@@ -1542,13 +1493,14 @@ if __name__ == "__main__":
         data = ['accurate', ratio, end-start]
         writer.writerow(data)
         """
-        #for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]:
-        for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5]:
+        for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]:
+        #for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5]:
             ratio = rat
             print(f'sampling ratio = {ratio}')
             start = timeit.default_timer()
             # DoGlobalReliKScore(args.embedding, args.dataset_name, nmb_KFold, size_subgraphs, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, ratio, heuristic)
-            perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+            if args.heuristic == 'binomial-cuda':
+                perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
             densestSubgraph(args.dataset_name, args.embedding, heuristic, ratio, models)
             end = timeit.default_timer()
             data = [f'{args.heuristic}', ratio, end-start]
@@ -1589,6 +1541,8 @@ if __name__ == "__main__":
         tstamp_tpc = end - start
     if 'densest' in task_list:
         start = timeit.default_timer()
+        if args.heuristic == 'binomial-cuda':
+            perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
         densestSubgraph(args.dataset_name, args.embedding, heuristic, ratio, models)
         end = timeit.default_timer()
         tstamp_den = end - start
