@@ -182,19 +182,27 @@ import torch.multiprocessing as mp
 
 parallel_uv = True
 
-def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, results, device, perm_entities, perm_relations, all_triple_id_torch=None):
+def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, results, device='cuda', perm_entities=None, perm_relations=None, all_triple_id_torch=None):
     #count = 0
     sib_sum = 0
     sib_sum_h = 0
     sib_sum_t = 0
     
     # Process each edge in the partition
-    for u, v in edge_partition:
-        w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, device, perm_entities, perm_relations, all_triple_id_torch)
-        #count += 1
-        sib_sum += w
-        sib_sum_h += w1
-        sib_sum_t += w2
+    if heur.__name__ == 'binomial_cuda':
+        for u, v in edge_partition:
+            w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, device, perm_entities, perm_relations, all_triple_id_torch)
+            #count += 1
+            sib_sum += w
+            sib_sum_h += w1
+            sib_sum_t += w2
+    else:
+        for u, v in edge_partition:
+            w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname)
+            #count += 1
+            sib_sum += w
+            sib_sum_h += w1
+            sib_sum_t += w2
 
     results.append((sib_sum, sib_sum_h, sib_sum_t))
 
@@ -241,31 +249,61 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
     #print(full_graph.num_triples, full_graph.num_entities)
     ### HERE!!!
     if parallel_uv is False:
-        #start_time_enum_subgraph = timeit.default_timer()
-        for subgraph in subgraphs:
-            count = 0
-            sib_sum = 0
-            sib_sum_h = 0
-            sib_sum_t = 0
-            start_uv = timeit.default_timer()
-            for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
-                w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname)
-                count += 1
-                sib_sum += w
-                sib_sum_h += w1
-                sib_sum_t += w2
-            end_uv = timeit.default_timer()
-            print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}, with {count} edges')
+        if heur.__name__ == 'binomial_cuda':
+            perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+            #all_triple_id_torch = encode_triples_to_id(full_graph.triples, full_graph.num_entities, full_graph.num_relations)
+            #all_triple_id_torch = all_triple_id_torch.to('cuda')
+            for subgraph in subgraphs:
+                count = 0
+                sib_sum = 0
+                sib_sum_h = 0
+                sib_sum_t = 0
+                start_uv = timeit.default_timer()
+                for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
+                    #w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname)
+                    w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, 'cuda', perm_entities, perm_relations, all_triple_id_torch)
+                    count += 1
+                    sib_sum += w
+                    sib_sum_h += w1
+                    sib_sum_t += w2
+                end_uv = timeit.default_timer()
+                print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}, with {count} edges')
 
-            sib_sum = sib_sum/count
-            sib_sum_h = sib_sum_h/count
-            sib_sum_t = sib_sum_t/count
-            model_ReliK_score.append(sib_sum)
-            model_ReliK_score_h.append(sib_sum_h)
-            model_ReliK_score_t.append(sib_sum_t)
-            tracker += 1
-            if tracker % 10 == 0:
-                print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+                sib_sum = sib_sum/count
+                sib_sum_h = sib_sum_h/count
+                sib_sum_t = sib_sum_t/count
+                model_ReliK_score.append(sib_sum)
+                model_ReliK_score_h.append(sib_sum_h)
+                model_ReliK_score_t.append(sib_sum_t)
+                tracker += 1
+                if tracker % 10 == 0:
+                    print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+        #start_time_enum_subgraph = timeit.default_timer()
+        else:
+            for subgraph in subgraphs:
+                count = 0
+                sib_sum = 0
+                sib_sum_h = 0
+                sib_sum_t = 0
+                start_uv = timeit.default_timer()
+                for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
+                    w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname)
+                    count += 1
+                    sib_sum += w
+                    sib_sum_h += w1
+                    sib_sum_t += w2
+                end_uv = timeit.default_timer()
+                print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}, with {count} edges')
+
+                sib_sum = sib_sum/count
+                sib_sum_h = sib_sum_h/count
+                sib_sum_t = sib_sum_t/count
+                model_ReliK_score.append(sib_sum)
+                model_ReliK_score_h.append(sib_sum_h)
+                model_ReliK_score_t.append(sib_sum_t)
+                tracker += 1
+                if tracker % 10 == 0:
+                    print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
         print(f"Total time for dh.getkHopneighbors: {getkHopneighbors_time} seconds")
         print(f"Total time for sampling: {sample_time} seconds")
         print(f"Total time for model loop: {model_loop_time} seconds")
@@ -303,11 +341,16 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             results = manager.list()
 
             processes = []
-            for i,edge_chunk in enumerate(edge_chunks):
-                p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results, 'cuda', perm_entities, perm_relations, all_triple_id_torch))
-                p.start()
-                processes.append(p)
-            
+            if heur.__name__ == 'binomial_cuda':
+                for i,edge_chunk in enumerate(edge_chunks):
+                    p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results, 'cuda', perm_entities, perm_relations, all_triple_id_torch))
+                    p.start()
+                    processes.append(p)
+            else:
+                for i,edge_chunk in enumerate(edge_chunks):
+                    p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results))
+                    p.start()
+                    processes.append(p)
             for p in processes:
                 p.join()
             
@@ -1283,6 +1326,8 @@ def densestSubgraph(datasetname, embedding, score_calculation, sample, models):
         start = timeit.default_timer()
         length: int = len(nx.DiGraph(M).edges())
         print(f'Starting with {length}')
+        if parallel_uv is True:
+            perm_relations, perm_entities = pre_randperm(full_graph.num_entities, full_graph.num_relations)
         for u,v in nx.DiGraph(M).edges():
             w,tailRR,relationRR = score_calculation(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
             if G.has_edge(u,v):
@@ -1299,8 +1344,8 @@ def densestSubgraph(datasetname, embedding, score_calculation, sample, models):
                 pct += 1
                 now = timeit.default_timer()
                 print(f'Finished with {pct}% for {datasetname} in time {now-start}, took avg of {(now-start)/pct} per point')
-            if(pct == 5):
-                break
+            #if(pct == 5):
+            #    break
 
         weighted_graph: list[tuple[str,str,float]] = []
         for u,v,data in G.edges(data=True):
