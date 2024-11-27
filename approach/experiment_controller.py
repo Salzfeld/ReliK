@@ -180,9 +180,9 @@ def KFoldNegGen(datasetname: str, n_split: int, all_triples_set, LP_triples_pos,
 #import multiprocessing as mp
 import torch.multiprocessing as mp
 
-parallel_uv = False
+parallel_uv = True
 
-def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, results):
+def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, results, device, perm_entities, perm_relations, all_triple_id_torch=None):
     #count = 0
     sib_sum = 0
     sib_sum_h = 0
@@ -190,7 +190,7 @@ def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, r
     
     # Process each edge in the partition
     for u, v in edge_partition:
-        w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname)
+        w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, device, perm_entities, perm_relations, all_triple_id_torch)
         #count += 1
         sib_sum += w
         sib_sum_h += w1
@@ -238,10 +238,6 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
 
     num_entities_par = full_graph.num_entities
     num_relations_par = full_graph.num_relations
-
-    global perm_entities, perm_relations
-    perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
-
     #print(full_graph.num_triples, full_graph.num_entities)
     ### HERE!!!
     if parallel_uv is False:
@@ -280,6 +276,14 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
     else: # parallel_uv = True
         # Try to use multi processors
         mp.set_start_method('spawn', force=True)
+        perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+        # Use Manager to create shared lists
+        """
+        manager = mp.Manager()
+        perm_entities = manager.list(perm_entities)
+        perm_relations = manager.list(perm_relations)
+        """
+
         for subgraph in subgraphs:
             count = 0
             sib_sum = 0
@@ -289,7 +293,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             
             edges = list(nx.DiGraph(M).subgraph(subgraph).edges())
             count = len(edges)
-            num_processors = 1
+            num_processors = 10
 
             chunk_size = len(edges) // num_processors
 
@@ -300,7 +304,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
 
             processes = []
             for i,edge_chunk in enumerate(edge_chunks):
-                p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results))
+                p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results, 'cuda', perm_entities, perm_relations, all_triple_id_torch))
                 p.start()
                 processes.append(p)
             
@@ -983,7 +987,7 @@ def decode_id_to_tensor(encoded_ids, entity_count: int, relation_count: int, dev
 
 def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, 
              relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], 
-             num_entities: int, num_relations: int, sample: float, dataset: str, device='cuda') -> float:
+             num_entities: int, num_relations: int, sample: float, dataset: str, device='cuda', this_perm_entities=None, this_perm_relations=None, all_triple_id_torch = None) -> float:
     '''
     Get approximate ReliK score with binomial approximation (optimized sampling)
     '''
@@ -994,8 +998,6 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     global model_loop_time
     global sample_first_while_time
     global sample_second_while_time
-    global perm_entities
-    global perm_relations
 
     start_time = timeit.default_timer() # profiling 1
     subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
@@ -1032,16 +1034,13 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         # Also assume there is no duplicates in sampling_tensor
 
         target_length = int(len_uu * sample * 1.2)
-        #target_length = int(min(len_uu*sample, 1000) * 1.2)
-        global perm_relations, perm_entities, all_triple_id_torch
 
-        # WARNING: Assuming that the number of entities and relations is relatively prime
-        entity_repeats = (target_length + len(perm_entities) - 1) // len(perm_entities)
-        relation_repeats = (target_length + len(perm_relations) - 1) // len(perm_relations)
+        entity_repeats = (target_length + len(this_perm_entities) - 1) // len(this_perm_entities)
+        relation_repeats = (target_length + len(this_perm_relations) - 1) // len(this_perm_relations)
         
         head_cycle = torch.full((target_length,), entity_to_id_map[u], device=device)
-        entity_cycle = perm_entities.repeat(entity_repeats)[:target_length]
-        relation_cycle = perm_relations.repeat(relation_repeats)[:target_length]
+        entity_cycle = this_perm_entities.repeat(entity_repeats)[:target_length]
+        relation_cycle = this_perm_relations.repeat(relation_repeats)[:target_length]
 
         # stack the indices
         sampling_tensor = torch.stack([head_cycle, relation_cycle, entity_cycle], dim=1)
@@ -1089,12 +1088,12 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         #global perm_relations, perm_entities, all_triple_id_torch
 
         # WARNING: Assuming that the number of entities and relations is relatively prime
-        entity_repeats = (target_length + len(perm_entities) - 1) // len(perm_entities)
-        relation_repeats = (target_length + len(perm_relations) - 1) // len(perm_relations)
+        entity_repeats = (target_length + len(this_perm_entities) - 1) // len(this_perm_entities)
+        relation_repeats = (target_length + len(this_perm_relations) - 1) // len(this_perm_relations)
 
         tail_cycle = torch.full((target_length,), entity_to_id_map[v], device=device)
-        entity_cycle = perm_entities.repeat(entity_repeats)[:target_length]
-        relation_cycle = perm_relations.repeat(relation_repeats)[:target_length]
+        entity_cycle = this_perm_entities.repeat(entity_repeats)[:target_length]
+        relation_cycle = this_perm_relations.repeat(relation_repeats)[:target_length]
 
         # stack the indices
         sampling_tensor = torch.stack([entity_cycle, relation_cycle, tail_cycle], dim=1)
@@ -1475,6 +1474,10 @@ if __name__ == "__main__":
                     subgraphs = subgraphs[:n_subgraphs]
     else:
         models = [emb.loadModel(f"Yago2",'mps')]
+
+    if parallel_uv == True:
+        perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+
 
     tstamp_sib = -1
     tstamp_pre = -1
