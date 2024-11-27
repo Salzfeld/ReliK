@@ -180,9 +180,9 @@ def KFoldNegGen(datasetname: str, n_split: int, all_triples_set, LP_triples_pos,
 #import multiprocessing as mp
 import torch.multiprocessing as mp
 
-parallel_uv = True
+parallel_uv = False
 
-def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname, results):
+def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, results):
     #count = 0
     sib_sum = 0
     sib_sum_h = 0
@@ -190,7 +190,7 @@ def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, r
     
     # Process each edge in the partition
     for u, v in edge_partition:
-        w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
+        w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname)
         #count += 1
         sib_sum += w
         sib_sum_h += w1
@@ -236,6 +236,9 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
     model_ReliK_score_t = []
     tracker = 0
 
+    num_entities_par = full_graph.num_entities
+    num_relations_par = full_graph.num_relations
+
     global perm_entities, perm_relations
     perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
 
@@ -250,7 +253,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             sib_sum_t = 0
             start_uv = timeit.default_timer()
             for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
-                w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
+                w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname)
                 count += 1
                 sib_sum += w
                 sib_sum_h += w1
@@ -286,19 +289,18 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             
             edges = list(nx.DiGraph(M).subgraph(subgraph).edges())
             count = len(edges)
-            num_processors = 10
+            num_processors = 1
 
             chunk_size = len(edges) // num_processors
 
             edge_chunks = [edges[i * chunk_size:(i + 1) * chunk_size] if i < num_processors - 1 else edges[i * chunk_size:] for i in range(num_processors)]
-            
 
             manager = mp.Manager()
             results = manager.list()
 
             processes = []
             for i,edge_chunk in enumerate(edge_chunks):
-                p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname, results))
+                p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results))
                 p.start()
                 processes.append(p)
             
@@ -795,7 +797,7 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
 random_choice_time = 0.0
 
 
-def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], alltriples: TriplesFactory, sample: float, dataset: str) -> float:
+def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], num_entities: int, num_relations: int, sample: float, dataset: str) -> float:
     '''
     get approximate ReliK score with binomial approximation
     '''
@@ -816,8 +818,8 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
     #print(entity_to_id_map)
     #subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(entity_to_id_map[u],entity_to_id_map[v],M)
     if sample > 0.4:
-        allset_uu = set(itertools.product([entity_to_id_map[u]],range(alltriples.num_relations),range(alltriples.num_entities)))
-        allset_vv = set(itertools.product(range(alltriples.num_entities),range(alltriples.num_relations),[entity_to_id_map[v]]))
+        allset_uu = set(itertools.product([entity_to_id_map[u]],range(num_relations),range(num_entities)))
+        allset_vv = set(itertools.product(range(num_entities),range(num_relations),[entity_to_id_map[v]]))
         len_uu = len(allset_uu.difference(all_triples_set))
         len_vv = len(allset_vv.difference(all_triples_set))
 
@@ -825,8 +827,8 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
         allset_u = set()
         allset_v = set()
         
-        lst_emb = list(range(alltriples.num_entities))
-        lst_emb_r = list(range(alltriples.num_relations))
+        lst_emb = list(range(num_entities))
+        lst_emb_r = list(range(num_relations))
 
         first = True
         count = 0
@@ -869,15 +871,15 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
     else:
         allset_u = set()
         allset_v = set()
-        len_uu = alltriples.num_entities*alltriples.num_relations
-        len_vv = alltriples.num_entities*alltriples.num_relations
+        len_uu = num_entities*num_relations
+        len_vv = num_entities*num_relations
         first = True
         start_first_while = timeit.default_timer() # profiling 4
         
         while len(allset_u) < len_uu * sample:
         #while len(allset_u) < min(len_uu*sample,1000):
 
-            kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
+            kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(num_relations),range(num_entities)] )))
             
             # optimization: sampling without replacement
             kg_neg_triple_tuple = (entity_to_id_map[u], kg_neg_triple_tuple[0], kg_neg_triple_tuple[1])
@@ -901,7 +903,7 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
 
         while len(allset_v) < len_vv * sample:
         #while len(allset_v) < min(len_vv*sample,1000):
-            kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
+            kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(num_relations),range(num_entities)] )))
             kg_neg_triple_tuple = (kg_neg_triple_tuple[1], kg_neg_triple_tuple[0], entity_to_id_map[v])
             if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
                 if first:
@@ -981,7 +983,7 @@ def decode_id_to_tensor(encoded_ids, entity_count: int, relation_count: int, dev
 
 def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, 
              relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], 
-             alltriples: TriplesFactory, sample: float, dataset: str, device='cuda') -> float:
+             num_entities: int, num_relations: int, sample: float, dataset: str, device='cuda') -> float:
     '''
     Get approximate ReliK score with binomial approximation (optimized sampling)
     '''
@@ -1006,8 +1008,8 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     if sample >= 0:
         allset_u = set()
         allset_v = set()
-        len_uu = alltriples.num_entities*alltriples.num_relations
-        len_vv = alltriples.num_entities*alltriples.num_relations
+        len_uu = num_entities*num_relations
+        len_vv = num_entities*num_relations
         first = True
         start_first_while = timeit.default_timer() # profiling 4
         """
@@ -1044,7 +1046,7 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         # stack the indices
         sampling_tensor = torch.stack([head_cycle, relation_cycle, entity_cycle], dim=1)
 
-        sampling_triple_id = encode_triples_to_id(sampling_tensor, alltriples.num_entities, alltriples.num_relations, device='cuda')
+        sampling_triple_id = encode_triples_to_id(sampling_tensor, num_entities, num_relations, device='cuda')
 
 
         #compareview = all_triple_id_torch.repeat(sampling_triple_id.shape[0], 1).T.to(device)
@@ -1055,7 +1057,7 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         
         only_negative_triples = sampling_triple_id[~torch.isin(sampling_triple_id, all_triple_id_torch)].clone().detach()
 
-        allset_u = decode_id_to_tensor(only_negative_triples, alltriples.num_entities, alltriples.num_relations)
+        allset_u = decode_id_to_tensor(only_negative_triples, num_entities, num_relations)
 
         #print(len(rslt_torch_u))
         #print(rslt_torch_u[:5])
@@ -1097,13 +1099,13 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         # stack the indices
         sampling_tensor = torch.stack([entity_cycle, relation_cycle, tail_cycle], dim=1)
 
-        sampling_triple_id = encode_triples_to_id(sampling_tensor, alltriples.num_entities, alltriples.num_relations, device='cuda')
+        sampling_triple_id = encode_triples_to_id(sampling_tensor, num_entities, num_relations, device='cuda')
 
         # Non-intersection (sampling except positive)
 
         only_negative_triples = sampling_triple_id[~torch.isin(sampling_triple_id, all_triple_id_torch)].clone().detach()
 
-        allset_v = decode_id_to_tensor(only_negative_triples, alltriples.num_entities, alltriples.num_relations)
+        allset_v = decode_id_to_tensor(only_negative_triples, num_entities, num_relations)
 
         end_second_while = timeit.default_timer() # profiling 5
         sample_second_while_time += end_second_while - start_second_while # profiling 5
