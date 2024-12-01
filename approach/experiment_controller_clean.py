@@ -115,14 +115,12 @@ def grabAllKFold(datasetname: str, n_split: int, embeddingname: str = 'TransE'):
     if not isExist:
         dh.generateKFoldSplit(full_dataset, datasetname, random_seed=None, n_split=nmb_KFold)
     full_dataset = torch.cat((all_triples, test_triples.mapped_triples, validation_triples.mapped_triples))
-
     full_graph = TriplesFactory(full_dataset,entity_to_id=entity_to_id_map,relation_to_id=relation_to_id_map)
 
-    # Need to store the ids of all positive triples on GPU
+
     global all_triple_id_torch
     all_triple_id_torch = encode_triples_to_id(full_dataset, full_graph.num_entities, full_graph.num_relations)
     all_triple_id_torch = all_triple_id_torch.to('cuda')
-    #print("check: ", full_dataset.device, all_triple_id_torch.device)
 
     emb_train_triples = []
     emb_test_triples = []
@@ -175,12 +173,29 @@ def KFoldNegGen(datasetname: str, n_split: int, all_triples_set, LP_triples_pos,
             neg_triples = dh.loadTriples(f"approach/KFold/{datasetname}_{n_split}_fold/{i}th_neg")
             LP_triples_neg.append(neg_triples)
     return LP_triples_neg
-### Focus on this function
 
-#import multiprocessing as mp
-import torch.multiprocessing as mp
-
+"""
+clean version
+there are 4 different combinations:
+1. Original ReliK Approximation
+    python experiment_controller_clean.py -d CodexSmall -e TransE -t ReliK -heur binomial -r 0.1
+2. ReliK Approximation with multiprocessing (Parallel enumerating)
+    python experiment_controller_clean.py -d CodexSmall -e TransE -t ReliK -heur binomial -r 0.1 -mp
+3. ReliK Approximation with sampling-only-once (Parallel Sampling)
+    python experiment_controller_clean.py -d CodexSmall -e TransE -t ReliK -heur binomial-cuda -r 0.1
+4. ReliK Approximation with sampling-only-once and multiprocessing (Parallel Sampling and enumerating)
+    python experiment_controller_clean.py -d CodexSmall -e TransE -t ReliK -heur binomial-cuda -r 0.1 -mp
+"""
 parallel_uv = False
+all_triple_id_torch = None
+
+# help function for parallel enumerating
+def pre_randperm(num_entities: int, num_relations: int, device='cuda') -> torch.Tensor:
+    perm_entities = torch.randperm(num_entities, device=device)
+    perm_relations = torch.randperm(num_relations, device=device)
+    return perm_entities, perm_relations
+
+import torch.multiprocessing as mp
 
 def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, results, device='cuda', perm_entities=None, perm_relations=None, all_triple_id_torch=None):
     #count = 0
@@ -206,24 +221,10 @@ def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, r
 
     results.append((sib_sum, sib_sum_h, sib_sum_t))
 
-getkHopneighbors_time = 0.0
-sample_time = 0.0
-entity_relation_loop_time = 0.0
-model_loop_time = 0.0
-sample_first_while_time = 0.0
-sample_second_while_time = 0.0
-
 def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, heur):
     '''
     compute the ReliK score on all subgraphs according to chosen heuristic
     '''
-    global getkHopneighbors_time, sample_time, entity_relation_loop_time, model_loop_time, sample_first_while_time, sample_second_while_time
-    getkHopneighbors_time = 0.0
-    sample_time = 0.0
-    entity_relation_loop_time = 0.0
-    model_loop_time = 0.0
-    sample_first_while_time = 0.0
-    sample_second_while_time = 0.0
     df = pd.DataFrame(full_graph.triples, columns=['subject', 'predicate', 'object'])
     M = nx.MultiDiGraph()
 
@@ -238,7 +239,6 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
     for t in df.values:
         M.add_edge(t[0], t[2], label = t[1])
 
-
     model_ReliK_score = []
     model_ReliK_score_h = []
     model_ReliK_score_t = []
@@ -246,78 +246,11 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
 
     num_entities_par = full_graph.num_entities
     num_relations_par = full_graph.num_relations
-    #print(full_graph.num_triples, full_graph.num_entities)
-    ### HERE!!!
-    if parallel_uv is False:
-        if heur.__name__ == 'binomial_cuda':
-            perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
-            for subgraph in subgraphs:
-                count = 0
-                sib_sum = 0
-                sib_sum_h = 0
-                sib_sum_t = 0
-                start_uv = timeit.default_timer()
-                for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
-                    w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, 'cuda', perm_entities, perm_relations, all_triple_id_torch)
-                    count += 1
-                    sib_sum += w
-                    sib_sum_h += w1
-                    sib_sum_t += w2
-                end_uv = timeit.default_timer()
-                print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}, with {count} edges')
 
-                sib_sum = sib_sum/count
-                sib_sum_h = sib_sum_h/count
-                sib_sum_t = sib_sum_t/count
-                model_ReliK_score.append(sib_sum)
-                model_ReliK_score_h.append(sib_sum_h)
-                model_ReliK_score_t.append(sib_sum_t)
-                tracker += 1
-                if tracker % 10 == 0:
-                    print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
-        #start_time_enum_subgraph = timeit.default_timer()
-        else:
-            for subgraph in subgraphs:
-                count = 0
-                sib_sum = 0
-                sib_sum_h = 0
-                sib_sum_t = 0
-                start_uv = timeit.default_timer()
-                for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
-                    w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname)
-                    count += 1
-                    sib_sum += w
-                    sib_sum_h += w1
-                    sib_sum_t += w2
-                end_uv = timeit.default_timer()
-                print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}, with {count} edges')
-
-                sib_sum = sib_sum/count
-                sib_sum_h = sib_sum_h/count
-                sib_sum_t = sib_sum_t/count
-                model_ReliK_score.append(sib_sum)
-                model_ReliK_score_h.append(sib_sum_h)
-                model_ReliK_score_t.append(sib_sum_t)
-                tracker += 1
-                if tracker % 10 == 0:
-                    print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
-        print(f"Total time for dh.getkHopneighbors: {getkHopneighbors_time} seconds")
-        print(f"Total time for sampling: {sample_time} seconds")
-        print(f"Total time for model loop: {model_loop_time} seconds")
-        print(f"Total time for sample first while loop: {sample_first_while_time} seconds")
-        print(f"Total time for sample second while loop: {sample_second_while_time} seconds")
-        #end_time_enum_subgraph = timeit.default_timer()
-        #print(f'Enum subgraph time: {end_time_enum_subgraph - start_time_enum_subgraph}')
-    else: # parallel_uv = True
-        # Try to use multi processors
+    if parallel_uv and heur.__name__ == 'binomial_cuda':
+        print("Parallel enumerating + Sampling-only-once")
         mp.set_start_method('spawn', force=True)
         perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
-        # Use Manager to create shared lists
-        """
-        manager = mp.Manager()
-        perm_entities = manager.list(perm_entities)
-        perm_relations = manager.list(perm_relations)
-        """
 
         for subgraph in subgraphs:
             count = 0
@@ -338,16 +271,10 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             results = manager.list()
 
             processes = []
-            if heur.__name__ == 'binomial_cuda':
-                for i,edge_chunk in enumerate(edge_chunks):
-                    p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results, 'cuda', perm_entities, perm_relations, all_triple_id_torch))
-                    p.start()
-                    processes.append(p)
-            else:
-                for i,edge_chunk in enumerate(edge_chunks):
-                    p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results))
-                    p.start()
-                    processes.append(p)
+            for i,edge_chunk in enumerate(edge_chunks):
+                p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results, 'cuda', perm_entities, perm_relations, all_triple_id_torch))
+                p.start()
+                processes.append(p)
             for p in processes:
                 p.join()
             
@@ -368,15 +295,117 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             tracker += 1
             if tracker % 10 == 0:
                 print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
-        print(f"Total time for dh.getkHopneighbors: {getkHopneighbors_time} seconds")
-        print(f"Total time for sampling: {sample_time} seconds")
-        print(f"Total time for model loop: {model_loop_time} seconds")
-        print(f"Total time for sample first while loop: {sample_first_while_time} seconds")
-        print(f"Total time for sample second while loop: {sample_second_while_time} seconds")
+
+    elif parallel_uv and heur.__name__ != 'binomial_cuda':
+        print("Only parallel enumerating uv")
+        # Only parallel enumerating on uv
+        mp.set_start_method('spawn', force=True)
+        perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+
+        for subgraph in subgraphs:
+            count = 0
+            sib_sum = 0
+            sib_sum_h = 0
+            sib_sum_t = 0
+            start_uv = timeit.default_timer()
+            
+            edges = list(nx.DiGraph(M).subgraph(subgraph).edges())
+            count = len(edges)
+            num_processors = 10
+
+            chunk_size = len(edges) // num_processors
+
+            edge_chunks = [edges[i * chunk_size:(i + 1) * chunk_size] if i < num_processors - 1 else edges[i * chunk_size:] for i in range(num_processors)]
+
+            manager = mp.Manager()
+            results = manager.list()
+
+            processes = []
+
+            for i,edge_chunk in enumerate(edge_chunks):
+                p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results))
+                p.start()
+                processes.append(p)
+            for p in processes:
+                p.join()
+            
+            sib_sum = sum([r[0] for r in results])
+            sib_sum_h = sum([r[1] for r in results])
+            sib_sum_t = sum([r[2] for r in results])
+            #print(sib_sum, sib_sum_h, sib_sum_t)
+            
+            end_uv = timeit.default_timer()
+            print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}')
+
+            sib_sum = sib_sum/count
+            sib_sum_h = sib_sum_h/count
+            sib_sum_t = sib_sum_t/count
+            model_ReliK_score.append(sib_sum)
+            model_ReliK_score_h.append(sib_sum_h)
+            model_ReliK_score_t.append(sib_sum_t)
+            tracker += 1
+            if tracker % 10 == 0:
+                print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+
+    elif not parallel_uv and heur.__name__ == 'binomial_cuda':
+        print("Only Sampling-only-once")
+        # Only Sampling-only-once
+        perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+        num_entities_par = full_graph.num_entities
+        num_relations_par = full_graph.num_relations
+        for subgraph in subgraphs:
+            count = 0
+            sib_sum = 0
+            sib_sum_h = 0
+            sib_sum_t = 0
+            start_uv = timeit.default_timer()
+            for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
+                w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, 'cuda', perm_entities, perm_relations, all_triple_id_torch)
+                count += 1
+                sib_sum += w
+                sib_sum_h += w1
+                sib_sum_t += w2
+            end_uv = timeit.default_timer()
+            print(f'have done subgraph: {id(subgraph)} in {end_uv - start_uv}, with {count} edges')
+
+            sib_sum = sib_sum/count
+            sib_sum_h = sib_sum_h/count
+            sib_sum_t = sib_sum_t/count
+            model_ReliK_score.append(sib_sum)
+            model_ReliK_score_h.append(sib_sum_h)
+            model_ReliK_score_t.append(sib_sum_t)
+            tracker += 1
+            if tracker % 10 == 0:
+                print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
+        pass
+    else: # not parallel_uv and heur.__name__ != 'binomial_cuda'
+        print("Original ReliK Approximation")
+        # Original ReliK Approximation
+        for subgraph in subgraphs:
+            count = 0
+            sib_sum = 0
+            sib_sum_h = 0
+            sib_sum_t = 0
+            start_uv = timeit.default_timer()
+            for u,v in nx.DiGraph(M).subgraph(subgraph).edges():
+                w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph.num_entities, full_graph.num_relations, sample, datasetname)
+                count += 1
+                sib_sum += w
+                sib_sum_h += w1
+                sib_sum_t += w2
+            end_uv = timeit.default_timer()
+            print(f"have done subgraph: {id(subgraph)} in {end_uv - start_uv} seconds, with {count} edges")
+
+            sib_sum = sib_sum/count
+            sib_sum_h = sib_sum_h/count
+            sib_sum_t = sib_sum_t/count
+            model_ReliK_score.append(sib_sum)
+            model_ReliK_score_h.append(sib_sum_h)
+            model_ReliK_score_t.append(sib_sum_t)
+            tracker += 1
+            if tracker % 10 == 0: print(f'have done {tracker} of {len(subgraphs)} in {embedding}')
 
     path = f"approach/scoreData/{datasetname}_{n_split}/{embedding}/ReliK_score_subgraphs_{size_subgraph}.csv"
-    if parallel_uv is True:
-        path = f"approach/scoreData/{datasetname}_{n_split}/{embedding}/ReliK_score_subgraphs_{size_subgraph}_parallel.csv"
     c = open(f'{path}', "w")
     writer = csv.writer(c)
     data = ['subgraph','ReliK','sib h','sib t']
@@ -757,15 +786,7 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     '''
     get exact ReliK score
     '''
-    global getkHopneighbors_time
-    global entity_relation_loop_time
-    global model_loop_time
-
-    start_time = timeit.default_timer() #profiling 1
     subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
-    end_time = timeit.default_timer()
-    getkHopneighbors_time += end_time - start_time #profiling 1
-
     if dataset == 'Yago2':
         head = u
         tail = v
@@ -775,8 +796,6 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
 
     first_u = True
     first_v = True
-
-    start_time = timeit.default_timer() #profiling 2
     for ent in range(alltriples.num_entities):
         for rel in range(alltriples.num_relations):
             kg_neg_triple_tuple = (entity_to_id_map[u],rel,ent)
@@ -797,9 +816,6 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
                 else:
                     rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([ent,rel,entity_to_id_map[v]]).resize_(1,3)))
     
-    end_time = timeit.default_timer()
-    entity_relation_loop_time += end_time - start_time #profiling 2
-
     first = True
     for tp in list(existing):
         if first:
@@ -811,12 +827,7 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
 
     hRankNeg = 0
     tRankNeg = 0
-
-    start_time = timeit.default_timer() #profiling 3
     for i in range(len(models)):
-        # make sure the model is on GPU
-        #models[i].to('cuda')
-
         comp_score = models[i].score_hrt(ex_torch).cpu()
         rslt_u_score = models[i].score_hrt(rslt_torch_u)
         rslt_v_score = models[i].score_hrt(rslt_torch_v)
@@ -830,35 +841,14 @@ def getReliKScore(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         hRankNeg += (he_sc /len(models))
         tRankNeg += (ta_sc /len(models))
     
-    end_time = timeit.default_timer()
-    model_loop_time += end_time - start_time #profiling 3
-    # print(getkHopneighbors_time, entity_relation_loop_time, model_loop_time)
-    
-    return ( (1/hRankNeg) + (1/tRankNeg) ) /2, 1/hRankNeg, 1/tRankNeg
-
-
-# We need a more fine grained profiling to understand the bottlenecks in sampling
-random_choice_time = 0.0
-
+    return ( (1/hRankNeg) + (1/tRankNeg) ) /2
 
 def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], num_entities: int, num_relations: int, sample: float, dataset: str) -> float:
     '''
     get approximate ReliK score with binomial approximation
     '''
     #list(map(random.choice, map(list, list_of_sets)))
-
-    global getkHopneighbors_time
-    global sample_time
-    global model_loop_time
-    global sample_first_while_time
-    global sample_second_while_time
-
-    start_time = timeit.default_timer() # profiling 1
     subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
-    end_time = timeit.default_timer() # profiling 1
-    getkHopneighbors_time += end_time - start_time # profiling 1
-
-    start_time = timeit.default_timer() # profiling 2
     #print(entity_to_id_map)
     #subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(entity_to_id_map[u],entity_to_id_map[v],M)
     if sample > 0.4:
@@ -876,8 +866,7 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
 
         first = True
         count = 0
-        while len(allset_u) < len_uu * sample:
-        #while len(allset_u) < min(len_uu*sample,1000):
+        while len(allset_u) < min(len_uu*sample,1000):
             #count += 1
             relation = random.choice(lst_emb_r)
             tail = random.choice(lst_emb)
@@ -896,8 +885,7 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
             #    break
         count = 0
         first = True
-        while len(allset_v) < len_vv * sample:
-        #while len(allset_v) < min(len_vv*sample,1000):
+        while len(allset_v) < min(len_vv*sample,1000):
             #count += 1
             relation = random.choice(lst_emb_r)
             head = random.choice(lst_emb)
@@ -918,16 +906,9 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
         len_uu = num_entities*num_relations
         len_vv = num_entities*num_relations
         first = True
-        start_first_while = timeit.default_timer() # profiling 4
-        
-        while len(allset_u) < len_uu * sample:
-        #while len(allset_u) < min(len_uu*sample,1000):
-
+        while len(allset_u) < min(len_uu*sample,1000):
             kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(num_relations),range(num_entities)] )))
-            
-            # optimization: sampling without replacement
             kg_neg_triple_tuple = (entity_to_id_map[u], kg_neg_triple_tuple[0], kg_neg_triple_tuple[1])
-            
             if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
                 if first:
                     first = False
@@ -936,20 +917,12 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
                 else:
                     rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
                 allset_u.add(kg_neg_triple_tuple)
-        #print(len(rslt_torch_u))
-
-        end_first_while = timeit.default_timer() # profiling 4
-        sample_first_while_time += end_first_while - start_first_while # profiling 4
 
         first = True
-
-        start_second_while = timeit.default_timer() # profiling 5
-
-        while len(allset_v) < len_vv * sample:
-        #while len(allset_v) < min(len_vv*sample,1000):
+        while len(allset_v) < min(len_vv*sample,1000):
             kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(num_relations),range(num_entities)] )))
             kg_neg_triple_tuple = (kg_neg_triple_tuple[1], kg_neg_triple_tuple[0], entity_to_id_map[v])
-            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
+            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_v:
                 if first:
                     first = False
                     rslt_torch_v = torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]])
@@ -957,16 +930,6 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
                 else:
                     rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
                 allset_v.add(kg_neg_triple_tuple)
-        
-
-        end_second_while = timeit.default_timer() # profiling 5
-        sample_second_while_time += end_second_while - start_second_while # profiling 5
-
-    #print(len(rslt_torch_u))
-    #print(rslt_torch_v)
-
-    end_time = timeit.default_timer() # profiling 2
-    sample_time += end_time - start_time # profiling 2
 
     first = True
     for tp in list(existing):
@@ -979,8 +942,6 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
 
     hRankNeg = 0
     tRankNeg = 0
-
-    start_time = timeit.default_timer() # profiling 3
     for i in range(len(models)):
         comp_score = models[i].score_hrt(ex_torch).cpu()
         rslt_u_score = models[i].score_hrt(rslt_torch_u)
@@ -994,24 +955,10 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
             ta_sc += torch.sum(rslt_v_score > tr).detach().numpy() + 1
         hRankNeg += ((he_sc / len(allset_u))/len(models)) * len_uu
         tRankNeg += ((ta_sc / len(allset_v))/len(models)) * len_vv
-    end_time = timeit.default_timer() # profiling 3
-    model_loop_time += end_time - start_time # profiling 3
-
-    #print(( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg)
+                   
     return ( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg
 
-# this is the optimized version of the binomial approximation
-
-def pre_randperm(num_entities: int, num_relations: int, device='cuda') -> torch.Tensor:
-    perm_entities = torch.randperm(num_entities, device=device)
-    perm_relations = torch.randperm(num_relations, device=device)
-    return perm_entities, perm_relations
-
-perm_entities = None
-perm_relations = None
-all_triple_id_torch = None
-
-#sampled_indices_only_once = None
+# helper functions for binomial_cuda
 
 def encode_triples_to_id(triples, entity_count: int, relation_count: int, device='cuda') -> torch.tensor:
     entity1, relation, entity2 = triples[:, 0], triples[:, 1], triples[:, 2]
@@ -1033,16 +980,10 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
     '''
     #list(map(random.choice, map(list, list_of_sets)))
 
-    global getkHopneighbors_time
-    global sample_time
-    global model_loop_time
-    global sample_first_while_time
-    global sample_second_while_time
-
     start_time = timeit.default_timer() # profiling 1
     subgraph_list, labels, existing, count, ex_triples  = dh.getkHopneighbors(u,v,M)
     end_time = timeit.default_timer() # profiling 1
-    getkHopneighbors_time += end_time - start_time # profiling 1
+    #getkHopneighbors_time += end_time - start_time # profiling 1
 
     start_time = timeit.default_timer() # profiling 2
     #print(entity_to_id_map)
@@ -1054,22 +995,6 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         len_vv = num_entities*num_relations
         first = True
         start_first_while = timeit.default_timer() # profiling 4
-        """
-        while len(allset_u) < min(len_uu*sample,1000):
-            kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
-            
-            # optimization: sampling without replacement
-            kg_neg_triple_tuple = (entity_to_id_map[u], kg_neg_triple_tuple[0], kg_neg_triple_tuple[1])
-            
-            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
-                if first:
-                    first = False
-                    rslt_torch_u = torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]])
-                    rslt_torch_u = rslt_torch_u.resize_(1,3)
-                else:
-                    rslt_torch_u = torch.cat((rslt_torch_u, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
-                allset_u.add(kg_neg_triple_tuple)
-        """
         # Directly sample 20% more indices without checking for negativities
         # Also assume there is no duplicates in sampling_tensor
 
@@ -1102,24 +1027,11 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         #print(rslt_torch_u[:5])
 
         end_first_while = timeit.default_timer() # profiling 4
-        sample_first_while_time += end_first_while - start_first_while # profiling 4
+        #sample_first_while_time += end_first_while - start_first_while # profiling 4
 
         first = True
 
         start_second_while = timeit.default_timer() # profiling 5
-        """
-        while len(allset_v) < min(len_vv*sample,1000):
-            kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(alltriples.num_relations),range(alltriples.num_entities)] )))
-            kg_neg_triple_tuple = (kg_neg_triple_tuple[1], kg_neg_triple_tuple[0], entity_to_id_map[v])
-            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
-                if first:
-                    first = False
-                    rslt_torch_v = torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]])
-                    rslt_torch_v = rslt_torch_v.resize_(1,3)
-                else:
-                    rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
-                allset_v.add(kg_neg_triple_tuple)
-        """
         # Directly sample 20% more indices without checking for negativities
         # Also assume there is no duplicates in sampling_tensor
         
@@ -1147,13 +1059,13 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         allset_v = decode_id_to_tensor(only_negative_triples, num_entities, num_relations)
 
         end_second_while = timeit.default_timer() # profiling 5
-        sample_second_while_time += end_second_while - start_second_while # profiling 5
+        #sample_second_while_time += end_second_while - start_second_while # profiling 5
 
     rslt_torch_u = allset_u
     rslt_torch_v = allset_v
 
     end_time = timeit.default_timer() # profiling 2
-    sample_time += end_time - start_time # profiling 2
+    #sample_time += end_time - start_time # profiling 2
 
     first = True
     for tp in list(existing):
@@ -1183,9 +1095,8 @@ def binomial_cuda(u: str, v: str, M: nx.MultiDiGraph, models: list[object], enti
         hRankNeg += ((he_sc / len(allset_u))/len(models)) * len_uu
         tRankNeg += ((ta_sc / len(allset_v))/len(models)) * len_vv
     end_time = timeit.default_timer() # profiling 3
-    model_loop_time += end_time - start_time # profiling 3
+    #model_loop_time += end_time - start_time # profiling 3
 
-    #print(( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg)
     return ( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg
 
 def lower_bound(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to_id_map: object, relation_to_id_map: object, all_triples_set: set[tuple[int,int,int]], alltriples: TriplesFactory, sample: float, dataset: str) -> float:
@@ -1323,8 +1234,6 @@ def densestSubgraph(datasetname, embedding, score_calculation, sample, models):
         start = timeit.default_timer()
         length: int = len(nx.DiGraph(M).edges())
         print(f'Starting with {length}')
-        if parallel_uv is True:
-            perm_relations, perm_entities = pre_randperm(full_graph.num_entities, full_graph.num_relations)
         for u,v in nx.DiGraph(M).edges():
             w,tailRR,relationRR = score_calculation(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
             if G.has_edge(u,v):
@@ -1341,8 +1250,6 @@ def densestSubgraph(datasetname, embedding, score_calculation, sample, models):
                 pct += 1
                 now = timeit.default_timer()
                 print(f'Finished with {pct}% for {datasetname} in time {now-start}, took avg of {(now-start)/pct} per point')
-            #if(pct == 5):
-            #    break
 
         weighted_graph: list[tuple[str,str,float]] = []
         for u,v,data in G.edges(data=True):
@@ -1402,6 +1309,7 @@ if __name__ == "__main__":
     parser.add_argument('-heur','--heuristic', dest='heuristic', type=str, help='which heuristic should be used in the case of dense subgraph task')
     parser.add_argument('-r','--ratio', dest='ratio', type=str, help='how much should be sampled for binomial', default=0.1)
     parser.add_argument('-c','--class', dest='classifier', type=str, help='classifier type')
+    parser.add_argument('-mp','--multiprocessing', dest='multiprocessing_uv', action='store_true', help='if set, use multiprocessing')
     args = parser.parse_args()
 
     nmb_KFold: int = 5
@@ -1426,6 +1334,13 @@ if __name__ == "__main__":
     if not args.embedding:
         print('Please, provide at least an embedding to perform an experiment')    
         quit(code=1)
+    
+    if args.multiprocessing_uv:
+        parallel_uv = True
+    else:
+        parallel_uv = False
+    # for debug
+    print(f"Use mp on uv: {parallel_uv}")
 
     # If no list provided do everything
     if args.tasks:
@@ -1451,6 +1366,9 @@ if __name__ == "__main__":
         if heuristic == 'binomial':
             ratio = float(args.ratio)
             heuristic = binomial
+        if heuristic == 'binomial-cuda':
+            ratio = 0.1
+            heuristic = binomial_cuda
         if heuristic == 'relik':
             heuristic = getReliKScore
             ratio = 0.1
@@ -1458,10 +1376,6 @@ if __name__ == "__main__":
             heuristic = lower_bound
         if heuristic == 'RR':
             heuristic = RR
-        # add test for cuda optimization for binomial
-        if heuristic == 'binomial-cuda':
-            heuristic = binomial_cuda
-            ratio = 0.1
     else:
         heuristic = binomial
         ratio = 0.1
@@ -1517,53 +1431,11 @@ if __name__ == "__main__":
     else:
         models = [emb.loadModel(f"Yago2",'mps')]
 
-    if parallel_uv == True:
-        perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
-
-
     tstamp_sib = -1
     tstamp_pre = -1
     tstamp_tpc = -1
     tstamp_den = -1
 
-    if 'time-measure' in task_list:
-        print('start with time measure')
-
-        path = f"approach/scoreData/time_measures_{args.embedding}_{args.dataset_name}_{args.heuristic}_approx.csv"
-        ex = os.path.isfile(path)
-        c = open(f'{path}', "a+")
-        writer = csv.writer(c)
-        """
-        start = timeit.default_timer()
-        densestSubgraph(args.dataset_name, args.embedding, getReliKScore, ratio, models)
-        end = timeit.default_timer()
-        data = ['accurate', ratio, end-start]
-        writer.writerow(data)
-        """
-        for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]:
-        #for rat in [0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5]:
-            ratio = rat
-            print(f'sampling ratio = {ratio}')
-            start = timeit.default_timer()
-            # DoGlobalReliKScore(args.embedding, args.dataset_name, nmb_KFold, size_subgraphs, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, ratio, heuristic)
-            if args.heuristic == 'binomial-cuda':
-                perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
-            densestSubgraph(args.dataset_name, args.embedding, heuristic, ratio, models)
-            end = timeit.default_timer()
-            data = [f'{args.heuristic}', ratio, end-start]
-            print(data)
-            writer.writerow(data)
-            """
-            start = timeit.default_timer()
-            densestSubgraph(args.dataset_name, args.embedding, binomial, ratio, models)
-            end = timeit.default_timer()
-            data = ['binomial', ratio, end-start]
-            writer.writerow(data)
-            """
-        c.close()
-        exit()
-
-        print('end with time measure')
     if 'ReliK' in task_list:
         print('start with ReliK')
         start = timeit.default_timer()
@@ -1588,8 +1460,6 @@ if __name__ == "__main__":
         tstamp_tpc = end - start
     if 'densest' in task_list:
         start = timeit.default_timer()
-        if args.heuristic == 'binomial-cuda':
-            perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
         densestSubgraph(args.dataset_name, args.embedding, heuristic, ratio, models)
         end = timeit.default_timer()
         tstamp_den = end - start
@@ -1636,4 +1506,3 @@ if __name__ == "__main__":
     data = [args.dataset_name, args.embedding, size_subgraphs, n_subgraphs, tstamp_sib, tstamp_pre, tstamp_tpc, tstamp_den]
     writer.writerow(data)
     c.close()
-
