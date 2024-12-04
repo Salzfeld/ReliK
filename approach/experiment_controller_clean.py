@@ -299,11 +299,12 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
     elif parallel_uv and heur.__name__ != 'binomial_cuda':
         print("Only parallel enumerating uv")
         # Only parallel enumerating on uv
-        mp.set_start_method('spawn', force=True)
-        perm_entities, perm_relations = pre_randperm(full_graph.num_entities, full_graph.num_relations)
+        #mp.set_start_method('spawn')
+
+        num_processors = 10
 
         for subgraph in subgraphs:
-            count = 0
+            # count = 0
             sib_sum = 0
             sib_sum_h = 0
             sib_sum_t = 0
@@ -311,7 +312,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
             
             edges = list(nx.DiGraph(M).subgraph(subgraph).edges())
             count = len(edges)
-            num_processors = 10
+            
 
             chunk_size = len(edges) // num_processors
 
@@ -326,6 +327,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
                 p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results))
                 p.start()
                 processes.append(p)
+                print(p.pid)
             for p in processes:
                 p.join()
             
@@ -1340,7 +1342,7 @@ if __name__ == "__main__":
     else:
         parallel_uv = False
     # for debug
-    print(f"Use mp on uv: {parallel_uv}")
+    # print(f"Use mp on uv: {parallel_uv}")
 
     # If no list provided do everything
     if args.tasks:
