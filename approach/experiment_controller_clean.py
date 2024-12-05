@@ -212,13 +212,15 @@ def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, r
             sib_sum_h += w1
             sib_sum_t += w2
     else:
+        #print(f"Start partition: {os.getpid()}")
         for u, v in edge_partition:
+            #print(f"before heur: {os.getpid()}")
             w, w1, w2 = heur(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname)
             #count += 1
             sib_sum += w
             sib_sum_h += w1
             sib_sum_t += w2
-
+    print(f"Success: {os.getpid()}")
     results.append((sib_sum, sib_sum_h, sib_sum_t))
 
 def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, heur):
@@ -327,7 +329,7 @@ def DoGlobalReliKScore(embedding, datasetname, n_split, size_subgraph, models, e
                 p = mp.Process(target=process_edges_partition, args=(edge_chunk, heur, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities_par, num_relations_par, sample, datasetname, results))
                 p.start()
                 processes.append(p)
-                print(p.pid)
+                # print(f"Start: {p.pid}")
             for p in processes:
                 p.join()
             
@@ -932,7 +934,7 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
                 else:
                     rslt_torch_v = torch.cat((rslt_torch_v, torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]]).resize_(1,3)))
                 allset_v.add(kg_neg_triple_tuple)
-
+    
     first = True
     for tp in list(existing):
         if first:
@@ -941,23 +943,25 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
             ex_torch = ex_torch.resize_(1,3)
         else:
             ex_torch = torch.cat((ex_torch, torch.LongTensor([entity_to_id_map[u],relation_to_id_map[tp],entity_to_id_map[v]]).resize_(1,3)))
-
+    
     hRankNeg = 0
     tRankNeg = 0
+    #print(f"before model loop {os.getpid()}")
     for i in range(len(models)):
         comp_score = models[i].score_hrt(ex_torch).cpu()
-        rslt_u_score = models[i].score_hrt(rslt_torch_u)
-        rslt_v_score = models[i].score_hrt(rslt_torch_v)
+        rslt_u_score = models[i].score_hrt(rslt_torch_u).cpu()
+        rslt_v_score = models[i].score_hrt(rslt_torch_v).cpu()
         count = 0
         he_sc = 0
         ta_sc = 0
+        #print(comp_score)
         for tr in comp_score:
             count += 1
             he_sc += torch.sum(rslt_u_score > tr).detach().numpy() + 1
             ta_sc += torch.sum(rslt_v_score > tr).detach().numpy() + 1
         hRankNeg += ((he_sc / len(allset_u))/len(models)) * len_uu
         tRankNeg += ((ta_sc / len(allset_v))/len(models)) * len_vv
-                   
+    
     return ( 1/hRankNeg + 1/tRankNeg )/2, 1/hRankNeg, 1/tRankNeg
 
 # helper functions for binomial_cuda
@@ -1190,6 +1194,18 @@ def lower_bound(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity
 
     return ( 1/hRankNeg + 1/tRankNeg )/2
 
+def process_edge_chunk_densest(edge_chunk, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname, score_calculation):
+    G = nx.DiGraph()
+    for u, v in edge_chunk:
+        w, tailRR, relationRR = score_calculation(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, num_entities, num_relations, sample, datasetname)
+        if G.has_edge(u, v):
+            G[u][v]['weight'] += w
+            G[u][v]['tailRR'] += tailRR
+            G[u][v]['relationRR'] += relationRR
+        else:
+            G.add_edge(u, v, weight=w, tailRR=tailRR, relationRR=relationRR)
+    return G
+
 def densestSubgraph(datasetname, embedding, score_calculation, sample, models):
     '''
     compute and store the weights with chosen score approximation for densest subgraphs tests
@@ -1236,23 +1252,75 @@ def densestSubgraph(datasetname, embedding, score_calculation, sample, models):
         start = timeit.default_timer()
         length: int = len(nx.DiGraph(M).edges())
         print(f'Starting with {length}')
-        for u,v in nx.DiGraph(M).edges():
-            w,tailRR,relationRR = score_calculation(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
-            if G.has_edge(u,v):
-                G[u][v]['weight'] += w
-                G[u][v]['tailRR'] += tailRR
-                G[u][v]['relationRR'] += relationRR
-            else:
-                G.add_edge(u, v, weight=w)
-                G.add_edge(u, v, tailRR=tailRR)
-                G.add_edge(u, v, relationRR=relationRR)
-            count += 1
-            now = timeit.default_timer()
-            if count % ((length // 100)+1) == 0:
-                pct += 1
+        ############################################
+        if parallel_uv is False and score_calculation.__name__ != 'binomial_cuda':
+            print(f'Original, sample ratio: {sample}')
+            for u,v in nx.DiGraph(M).edges():
+                #w,tailRR,relationRR = score_calculation(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
+                w,tailRR,relationRR = score_calculation(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph.num_entities, full_graph.num_relations, sample, datasetname)
+                if G.has_edge(u,v):
+                    G[u][v]['weight'] += w
+                    G[u][v]['tailRR'] += tailRR
+                    G[u][v]['relationRR'] += relationRR
+                else:
+                    G.add_edge(u, v, weight=w)
+                    G.add_edge(u, v, tailRR=tailRR)
+                    G.add_edge(u, v, relationRR=relationRR)
+                count += 1
                 now = timeit.default_timer()
-                print(f'Finished with {pct}% for {datasetname} in time {now-start}, took avg of {(now-start)/pct} per point')
+                if count % ((length // 100)+1) == 0:
+                    pct += 1
+                    now = timeit.default_timer()
+                    print(f'Finished with {pct}% for {datasetname} in time {now-start}, took avg of {(now-start)/pct} per point')
+        elif parallel_uv is False and score_calculation.__name__ == 'binomial_cuda':
+            print(f'Sample-only-once, sample ratio: {sample}')
 
+            # get some preminaries
+            num_entities = full_graph.num_entities
+            num_relations = full_graph.num_relations
+            perm_entities, perm_entities = pre_randperm(num_entities, num_relations, device='cuda')
+
+            for u,v in nx.DiGraph(M).edges():
+                #w,tailRR,relationRR = score_calculation(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph, sample, datasetname)
+                w,tailRR,relationRR = score_calculation(u, v, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph.num_entities, full_graph.num_relations, sample, datasetname, device='cuda', this_perm_entities=perm_entities, this_perm_relations=perm_entities, all_triple_id_torch = all_triple_id_torch)
+                if G.has_edge(u,v):
+                    G[u][v]['weight'] += w
+                    G[u][v]['tailRR'] += tailRR
+                    G[u][v]['relationRR'] += relationRR
+                else:
+                    G.add_edge(u, v, weight=w)
+                    G.add_edge(u, v, tailRR=tailRR)
+                    G.add_edge(u, v, relationRR=relationRR)
+                count += 1
+                now = timeit.default_timer()
+                if count % ((length // 100)+1) == 0:
+                    pct += 1
+                    now = timeit.default_timer()
+                    print(f'Finished with {pct}% for {datasetname} in time {now-start}, took avg of {(now-start)/pct} per point')
+        elif parallel_uv is True and score_calculation.__name__ != 'binomial_cuda':
+            """
+            print(f'Parallel uv, sample ratio: {sample}')
+            # chunkify
+            num_processors = 10
+            edge_chunks = np.array_split(list(nx.DiGraph(M).edges()), num_processors)
+            with mp.Pool(processes=num_processors) as pool:
+                results = pool.starmap(process_edge_chunk_densest, [(edge_chunk, M, models, entity_to_id_map, relation_to_id_map, all_triples_set, full_graph.num_entities, full_graph.num_relations, sample, datasetname, score_calculation) for edge_chunk in edge_chunks])
+            
+            for result in results:
+                for u, v, data in result.edges(data=True):
+                    if G.has_edge(u, v):
+                        G[u][v]['weight'] += data['weight']
+                        G[u][v]['tailRR'] += data['tailRR']
+                        G[u][v]['relationRR'] += data['relationRR']
+                    else:
+                        G.add_edge(u, v, weight=data['weight'])
+                        G.add_edge(u, v, tailRR=data['tailRR'])
+                        G.add_edge(u, v, relationRR=data['relationRR'])"""
+            pass
+        elif parallel_uv is True and score_calculation.__name__ == 'binomial_cuda':
+            print(f'Sample-only-once + parallel uv, sample ratio: {sample}')
+            pass
+        ############################################
         weighted_graph: list[tuple[str,str,float]] = []
         for u,v,data in G.edges(data=True):
             weighted_graph.append((u,v,data['weight'],data['tailRR'],data['relationRR']))

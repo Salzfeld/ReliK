@@ -203,7 +203,7 @@ def process_edges_partition(edge_partition, heur, M, models, entity_to_id_map, r
             sib_sum += w
             sib_sum_h += w1
             sib_sum_t += w2
-
+    print(f"Success: {os.getpid()}")
     results.append((sib_sum, sib_sum_h, sib_sum_t))
 
 getkHopneighbors_time = 0.0
@@ -949,7 +949,7 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
         #while len(allset_v) < min(len_vv*sample,1000):
             kg_neg_triple_tuple = tuple(map(random.choice, map(list, [range(num_relations),range(num_entities)] )))
             kg_neg_triple_tuple = (kg_neg_triple_tuple[1], kg_neg_triple_tuple[0], entity_to_id_map[v])
-            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_u:
+            if kg_neg_triple_tuple not in all_triples_set and kg_neg_triple_tuple not in allset_v:
                 if first:
                     first = False
                     rslt_torch_v = torch.LongTensor([kg_neg_triple_tuple[0],kg_neg_triple_tuple[1],kg_neg_triple_tuple[2]])
@@ -979,7 +979,7 @@ def binomial(u: str, v: str, M: nx.MultiDiGraph, models: list[object], entity_to
 
     hRankNeg = 0
     tRankNeg = 0
-
+    #print(f"Here: {os.getpid()}")
     start_time = timeit.default_timer() # profiling 3
     for i in range(len(models)):
         comp_score = models[i].score_hrt(ex_torch).cpu()
